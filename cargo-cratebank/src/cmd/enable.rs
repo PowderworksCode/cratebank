@@ -18,8 +18,6 @@ const BUILD_RS_SNIPPET: &str = r#"fn main() {
 
 /// The two unstable flags must be enabled at the WORKSPACE root, or a build
 /// started from the root never sees them.
-/// The two unstable flags must be enabled at the WORKSPACE root, or a build
-/// started from the root never sees them.
 pub(crate) fn write_cargo_config(root: &std::path::Path, o: &Common, changed: &mut Vec<&'static str>) {
     let cfg = root.join(".cargo").join("config.toml");
     let want = "[unstable]\nbuild-analysis = true\nsection-timings = true\n\n[build.analysis]\nenabled = true\n";
