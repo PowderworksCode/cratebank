@@ -10,11 +10,40 @@ builds, no conflict with sccache. It reads those logs, redacts private
 identity, and POSTs them.
 
 ```
+cargo cratebank enable                opt this project in to automatic sending
+cargo cratebank watch                 ship every completed session (background)
 cargo cratebank build [cargo args…]   build with both flags on, then send
 cargo cratebank send [--all|--session ID|--since N]
 cargo cratebank status                is everything wired up?
 cargo cratebank serve [--port 8787]   echo collector, for testing
 ```
+
+## Automatic sending
+
+`cargo cratebank enable` writes three things: the opt-in
+(`[package.metadata.cratebank] share = true`, or `[workspace.metadata…]` for a
+virtual workspace), the two unstable flags in the **workspace root's**
+`.cargo/config.toml`, and a small `build.rs` trigger. After that, ordinary
+`cargo build` ships its session log — nothing cratebank-shaped in the command.
+
+Two paths, and the difference matters:
+
+| path | how | reliability |
+| --- | --- | --- |
+| **watcher** (recommended) | `cargo cratebank watch` in the background; ships every completed session from any opted-in workspace, and clears any backlog | sees **every** build |
+| **build.rs trigger** | written by `enable`; spawns a detached helper that waits for the parent cargo to exit, then ships | **best-effort** — cargo does not guarantee it reruns a build script on every rebuild |
+
+The helper waits for the cargo process that spawned it to exit before reading
+the log, because `build.rs` runs early in a build: "the log stopped growing" on
+its own would ship a partial session during a gap between slow units.
+
+Opt-out is `share = false`, or delete the metadata key. `CRATEBANK_DEBUG=1`
+explains why a send did or did not fire.
+
+Two safety properties worth stating plainly: the opt-in must live in **your
+own** manifest, and a manifest inside `CARGO_HOME` (i.e. a downloaded
+dependency) can never trigger a send — a published crate cannot enrol its
+consumers.
 
 Flags: `--dry-run` (print the exact payload, send nothing), `--endpoint URL`,
 `--keep-private` (skip redaction — for your own collector only).
