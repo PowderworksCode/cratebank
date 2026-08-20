@@ -16,6 +16,7 @@
 //!   cmd/*     one file per subcommand
 mod buildenv;
 mod cli;
+mod machine;
 mod cmd;
 mod project;
 mod session;

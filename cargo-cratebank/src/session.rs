@@ -226,7 +226,14 @@ pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
             "ci": std::env::var("CI").is_ok(),
         },
         "repository": repository,
+        "machine": crate::machine::snapshot(),
         "build_env": build_env,
+        // A session log has no build-finished event, so a build that failed
+        // half way looks exactly like one that completed. Every registered
+        // unit that never finished is either still running (impossible, we
+        // waited) or died with the build -- so this is the completeness flag.
+        "complete": events.iter().filter(|e| e["reason"] == "unit-finished").count()
+                  == events.iter().filter(|e| e["reason"] == "unit-registered").count(),
         "counts": {"events": events.len(), "units": units, "sections": sections,
                    // identity, timings and edges of withheld units are absent
                    // entirely; only this count records that they existed

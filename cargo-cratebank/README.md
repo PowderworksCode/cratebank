@@ -97,6 +97,20 @@ recorded **as resolved** rather than as requested:
 | `build` / `check` / `test` | `mode`, per unit |
 | `-Z…` | kept — flag names survive scrubbing |
 
+### Machine identity
+
+The census separates *this crate is expensive* from *this machine is slow* with
+a crossed random-effects model, which needs a stable label per machine. That
+label is **random**, generated once, and stored in
+`$CARGO_HOME/cratebank/machine-id` — not derived from a hostname, MAC address,
+username or anything else about you. It groups your own builds together and
+says nothing else. Delete the file and you are a new machine.
+
+Alongside it: the specs a hardware review would print — CPU model, cores,
+memory to the nearest GB, kernel, OS/arch, virtualization, cargo version, and
+whether `CI` is set. Each is shared by millions of machines. Hostname, user and
+network identity are never read.
+
 ### Build configuration from the environment
 
 `RUSTFLAGS`, the linker and any compiler wrapper move compile time, and cargo's
@@ -115,6 +129,11 @@ whole, and every value is classified before it is allowed out:
 Flag names and non-path values are build configuration and are the point of
 collecting this; anything path-shaped is somebody's filesystem and never leaves
 the machine. Covered by unit tests.
+
+A session log has no build-finished event, so a build that died half way looks
+exactly like one that completed. Every payload therefore carries a `complete`
+flag: registered units versus finished units. Truncated sessions are data, but
+they are not the same data.
 
 The only trace of withheld code is a `units_withheld` count, kept so a partial
 graph is visibly partial rather than silently truncated. Measured on ripgrep:
@@ -186,6 +205,13 @@ server-side.
     "profile": "dev", "jobs": 16, "num_cpus": 16, "ci": false,
     "rustc_version": "1.99.0-nightly",
     "rustc_version_verbose": "… commit-hash, commit-date, LLVM version …"
+  },
+  "complete": true,
+  "machine": {
+    "machine_id": "b904…", "cpu_model": "AMD EPYC 9554P 64-Core Processor",
+    "cpu_cores": 16, "mem_gb": 63, "kernel": "6.12.93",
+    "os": "linux", "arch": "x86_64", "virt": "kvm", "ci": false,
+    "cargo_version": "cargo 1.96.1 (356927216 2026-06-26)"
   },
   "build_env": {
     "env": {"RUSTFLAGS": ["-C target-cpu=native", "-C lto=thin", "-C linker=clang"]},
