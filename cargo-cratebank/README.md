@@ -122,6 +122,16 @@ section-timings = true
 enabled = true
 ```
 
+## Layout
+
+| file | role |
+| --- | --- |
+| `cli.rs` | the clap command-line surface, `$CARGO_HOME`, debug logging |
+| `session.rs` | finding, reading and filtering cargo's session logs — the privacy rules live here |
+| `project.rs` | manifests, opt-in, workspace roots, and detecting that a build has finished |
+| `ship.rs` | transport and the ledger of what has already been sent |
+| `cmd/*.rs` | one file per subcommand |
+
 ## Payload
 
 One session, one POST. Events pass through **verbatim** under a small header:
