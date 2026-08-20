@@ -1,38 +1,62 @@
 # cratebank
 
-A public cohort of Rust compilations: what it costs to compile the ecosystem,
-measured, versioned, and published for anyone to query.
+**A continuous census of Rust compilation as it actually happens.**
 
-Each **stratum** is one immutable monthly release — a pinned nightly, the top
-~1000 crates and projects, every compilation unit measured once, published as
-parquet + raw instrument outputs on object storage. You analyse it with
-`ATTACH` and SQL; there is no server.
+People opt in to sharing the build timings they were already producing. Their
+build environment is snapshotted alongside per-dependency timings and shipped
+to ClickHouse like any other log stream. Nothing extra is compiled; the work
+was happening anyway.
 
-Two collection paths feed the same schema:
+The result is something that does not currently exist: an ongoing,
+representative record of how Rust is really built — which toolchains, targets,
+linkers, profiles, feature sets, and hardware, and what each dependency
+actually costs in the wild, across CI and laptops, over time.
 
-- **the archival round** — one controlled machine, uniform policy, deep
-  instrumentation. The calibrated backbone.
-- **contributed builds** — volunteers run `cargo whyslow` on their own
-  projects and opt in to sending measurements. Coverage, real configurations,
-  real hardware, at a scale no single machine reaches.
+Collection and analysis are deliberately separate concerns:
 
-The unit of analysis is the **compilation class**, not the project: a
-(package, version, features, cone, profile, flags, target) fingerprint. Two
-projects compiling the same class the same way are measuring one individual
-twice — which is what makes deduplication, cross-machine calibration and
-cross-stratum comparison all work.
+- **cratebank collects.** Capture generously, log broadly, model nothing at
+  ingest. Schema-on-read.
+- **Studies model.** Statistical work — cost models, causal experiments,
+  regression detection — is built *on top of* the data as separate projects,
+  and can be redone as understanding improves without re-collecting anything.
+
+## What is collected
+
+Per build: a **build-environment snapshot** (toolchain, target, profile,
+linker, jobs, hardware, wrapper/cache state, CI or local) plus **per-unit
+timings** for every compilation unit in the graph.
+
+Every unit is keyed by a **compilation class** — a
+(package, version, features, cone, profile, flags, target) fingerprint — so
+the same dependency built by thousands of people is recognisably the same
+individual, which is what makes cross-machine and cross-time comparison work.
+
+**Public projects** are linked as themselves: repository, workspace members,
+their own compile costs.
+
+**Private projects** send their public dependency measurements and no
+top-level identity — no project name, no workspace crate names, no paths.
+Nearly all of the value is in the dependency graph, and that part is public
+code regardless of who is compiling it.
+
+## Two collection tiers
+
+| tier | how | gets |
+| --- | --- | --- |
+| **harvest** | reads `target/cargo-timings/` artifacts cargo already writes | zero configuration, nothing in the compile path; per-unit **wall** time |
+| **shim** | `RUSTC_WRAPPER=whyslow-shim`, chaining any existing wrapper | per-invocation CPU/RSS via `wait4`; comparable to controlled measurements |
+
+Caches are handled honestly: a wrapper hit is recorded as a cache event with
+no timing claim, a miss is a genuine compile and measured as one.
 
 | repo | role |
 | --- | --- |
-| **cratebank** (this) | the dataset: schema, capture manifest, stratum builder, publication |
-| **whyslow** | the instrument: `cargo whyslow` measures a build and explains why it was slow; also the contribution client |
-| **crategen** | synthetic workspaces with controlled characteristics; also cratebank's calibration standard |
-
-Statistical methodology for the *study* that uses this data lives in the
-research repository. cratebank is the bank, not the analysis.
+| **cratebank** (this) | the census: schema, collection design, ingest, publication |
+| **whyslow** | the client: `cargo whyslow` measures a build and explains why it was slow; contribution is a flag on a tool people already want |
+| **crategen** | synthetic workspaces with controlled characteristics — the causal complement to observational data |
 
 ## Docs
 
-- [`docs/schema.md`](docs/schema.md) — the data model and why it is keyed this way
-- [`docs/capture-manifest.md`](docs/capture-manifest.md) — everything recorded about a build
-- [`docs/contributed-builds.md`](docs/contributed-builds.md) — the volunteer path: design, privacy, calibration
+- [`docs/collection.md`](docs/collection.md) — what is captured, privacy, tiers, contamination flags
+- [`docs/schema.md`](docs/schema.md) — the event log and the class fingerprint
+- [`docs/capture-manifest.md`](docs/capture-manifest.md) — the exhaustive field list, including deep-instrumentation fields for controlled runs
