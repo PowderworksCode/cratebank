@@ -14,7 +14,9 @@ pub fn run(o: &Common, args: &[String]) -> i32 {
         .arg("--config").arg("build.analysis.enabled=true")
         .args(args);
     eprintln!("cratebank: cargo build -Zbuild-analysis -Zsection-timings {}", args.join(" "));
+    let sampler = crate::load::Sampler::start();
     let st = c.status();
+    let _ = sampler;
     match st {
         Ok(s) if !s.success() => { eprintln!("cratebank: build failed; sending nothing"); return 1 }
         Err(e) => { eprintln!("cratebank: cannot run cargo: {e}"); return 1 }

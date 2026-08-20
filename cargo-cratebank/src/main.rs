@@ -14,11 +14,14 @@
 //!   project   manifests, opt-in, workspace roots, build liveness
 //!   ship      transport and the ledger of what has already been sent
 //!   cmd/*     one file per subcommand
+mod artifacts;
 mod buildenv;
 mod cli;
+mod load;
 mod machine;
 mod cmd;
 mod project;
+mod rusage;
 mod session;
 mod ship;
 
@@ -26,6 +29,17 @@ mod ship;
 use cli::{Cli, Cmd};
 
 fn main() {
+    // RUSTC_WRAPPER must name a bare executable, and cargo execs it with the
+    // real rustc as argv[1]. Detect that shape and go straight to the shim,
+    // before clap sees a command line full of rustc flags.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(|a| {
+        let f = a.rsplit(['/', '\\']).next().unwrap_or(a);
+        f == "rustc" || f == "rustc.exe"
+    }).unwrap_or(false) {
+        std::process::exit(rusage::shim(&argv));
+    }
+
     let cli = Cli::parse_from_cargo();
     let c = &cli.common;
     let code = match cli.cmd {
@@ -36,6 +50,7 @@ fn main() {
         Cmd::Status => cmd::status::run(c),
         Cmd::Serve { port } => cmd::serve::run(c, port),
         Cmd::Autosend { detach } => cmd::autosend::run(c, detach),
+        Cmd::RustcShim { ref args } => rusage::shim(args),
     };
     std::process::exit(code);
 }

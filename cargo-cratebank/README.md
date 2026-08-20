@@ -192,6 +192,39 @@ enabled = true
 | `ship.rs` | transport and the ledger of what has already been sent |
 | `cmd/*.rs` | one file per subcommand |
 
+## CPU time, load and artifact bytes
+
+Cargo's log reports **wall clock** per unit, which on a `-j16` build is largely
+a statement about contention. Three additions make the data answer cost
+questions rather than scheduling ones.
+
+**Per-unit CPU** — opt in by pointing `RUSTC_WRAPPER` at this binary:
+
+```sh
+RUSTC_WRAPPER=$(command -v cargo-cratebank) cargo build
+```
+
+It execs the real rustc, reaps it with `wait4`, and records user+sys CPU and
+peak RSS per invocation; `send` merges those into the session. It **chains** —
+set `CRATEBANK_INNER_WRAPPER` to keep `sccache` in the loop — and a failure
+inside the shim still runs the compiler and still returns its status. Every
+payload carries `cpu_coverage` (`{"matched": 34, "units": 34}`) so an analysis
+never mistakes a wall time for a CPU time. Build-script *executions* are
+excluded from the denominator: they run no compiler, so they can never have
+rustc CPU.
+
+**Machine load** — sampled *during* the build (`build` and `watch`, the two
+commands present for one): mean and max load average, plus pressure-stall
+deltas for cpu/io/memory. A session shipped after the fact with `send` reports
+`load: null` rather than a figure measured at the wrong time.
+
+**Artifact bytes** — rmeta, rlib and object bytes per crate, scanned from the
+target directory when the build ends. rmeta tracks what the frontend had to
+describe and object bytes what the backend had to emit, so both are good
+responses and both are free. Sizes are reported **only for units being sent**:
+a file name in a target directory contains a crate name, so measuring a
+withheld unit would leak the identity the filter just removed.
+
 ## Payload
 
 One session, one POST. Events pass through **verbatim** under a small header:
@@ -222,6 +255,11 @@ server-side.
     "env": {"RUSTFLAGS": ["-C target-cpu=native", "-C lto=thin", "-C linker=clang"]},
     "config": {"build.rustc-wrapper": "sccache", "build.incremental": "false"}
   },
+  "cpu_coverage": {"matched": 34, "units": 34},
+  "load": {"loadavg_mean": 4.1, "loadavg_max": 9.8, "samples": 12,
+           "stall_seconds": {"cpu": 0.31, "io": 0.02, "memory": 0.0}},
+  "artifacts": {"total": {"rmeta": 29190392, "rlib": 89460474, "obj": 0},
+                "per_crate": {"aho_corasick": {"rmeta": 1871852, "rlib": 10809004, "obj": 0}}},
   "counts": {"events": 338, "units": 43, "sections": 68, "units_withheld": 11},
   "events": [
     {"reason": "build-started", "command": ["cargo", "<arg>", "-Zbuild-analysis", …], …},

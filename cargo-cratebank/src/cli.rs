@@ -48,6 +48,12 @@ pub enum Cmd {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
+    /// Internal: the RUSTC_WRAPPER entry point that records per-invocation CPU
+    #[command(hide = true, disable_help_flag = true)]
+    RustcShim {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Internal: used by the build.rs trigger
     #[command(hide = true)]
     Autosend {

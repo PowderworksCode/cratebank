@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use serde_json::Value;
+
 use crate::cli::{cargo_home, dbg, Common};
 use crate::project::{ancestor_cargo, opted_in, wait_for_exit, wait_quiet, workspace_root};
 use crate::session::{payload, read_session, session_workspace, sessions};
@@ -72,10 +74,11 @@ pub fn run(o: &Common, detach: bool) -> i32 {
     let Some(s) = read_session(&newest) else {
         dbg("could not parse session"); return 0;
     };
+    let mut s = s;
     let run_id = s.run_id.clone();
     if already_sent(&run_id) { dbg(&format!("{run_id} already sent")); return 0; }
-    let body = payload(&s.run_id, s.events, &s.header, s.withheld,
-                           crate::buildenv::snapshot(&s.dir));
+    let env = crate::buildenv::snapshot(&s.dir);
+    let body = payload(&mut s, env, Value::Null);
     match post(&o.endpoint, &body) {
         Ok(_) => { mark_sent(&run_id); dbg(&format!("sent {run_id} -> {}", o.endpoint)); }
         Err(e) => dbg(&format!("POST failed: {e}")),
