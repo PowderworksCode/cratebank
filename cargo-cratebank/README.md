@@ -97,11 +97,24 @@ recorded **as resolved** rather than as requested:
 | `build` / `check` / `test` | `mode`, per unit |
 | `-Z…` | kept — flag names survive scrubbing |
 
-What is genuinely *not* captured today, by cargo or by us: `RUSTFLAGS` and the
-linker in use. Both affect compile time and both belong in a build-environment
-census, but they live in environment variables and config that can contain
-local paths, so capturing them needs a deliberate design rather than a blanket
-read. Tracked as future work.
+### Build configuration from the environment
+
+`RUSTFLAGS`, the linker and any compiler wrapper move compile time, and cargo's
+log does not record them — so `build_env` collects them from a **whitelist** of
+environment variables and cargo's resolved config. Never the environment as a
+whole, and every value is classified before it is allowed out:
+
+| shape | treatment |
+| --- | --- |
+| `-C opt-level=2`, `-C target-cpu=native`, `-Zthreads=8` | kept verbatim |
+| `-C linker=/usr/bin/clang`, `RUSTC_WRAPPER=/usr/local/bin/sccache` | basename only → `clang`, `sccache` |
+| any value containing a path separator | value replaced with `<path>` |
+| `--remap-path-prefix=…`, `-L /home/…` | dropped entirely |
+| unrecognised flag with a value | name kept, value replaced |
+
+Flag names and non-path values are build configuration and are the point of
+collecting this; anything path-shaped is somebody's filesystem and never leaves
+the machine. Covered by unit tests.
 
 The only trace of withheld code is a `units_withheld` count, kept so a partial
 graph is visibly partial rather than silently truncated. Measured on ripgrep:
@@ -167,13 +180,16 @@ server-side.
   "cratebank_schema": 1,
   "client": "cargo-cratebank 0.1.0",
   "run_id": "20260820T215558080Z-2437f0c648fa6cb1",
-  "public_only": true,          // a constant, not a mode
   "repository": null,
   "env": {
     "host": "x86_64-unknown-linux-gnu",
     "profile": "dev", "jobs": 16, "num_cpus": 16, "ci": false,
     "rustc_version": "1.99.0-nightly",
     "rustc_version_verbose": "… commit-hash, commit-date, LLVM version …"
+  },
+  "build_env": {
+    "env": {"RUSTFLAGS": ["-C target-cpu=native", "-C lto=thin", "-C linker=clang"]},
+    "config": {"build.rustc-wrapper": "sccache", "build.incremental": "false"}
   },
   "counts": {"events": 338, "units": 43, "sections": 68, "units_withheld": 11},
   "events": [

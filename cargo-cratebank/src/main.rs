@@ -14,6 +14,7 @@
 //!   project   manifests, opt-in, workspace roots, build liveness
 //!   ship      transport and the ledger of what has already been sent
 //!   cmd/*     one file per subcommand
+mod buildenv;
 mod cli;
 mod cmd;
 mod project;

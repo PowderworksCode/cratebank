@@ -19,7 +19,8 @@ pub fn run(o: &Common, a: &SendArgs) -> i32 {
     for p in &list {
         let Some(s) = read_session(p) else { continue };
         let run_id = s.run_id.clone();
-        let body = payload(&s.run_id, s.events, &s.header, s.withheld);
+        let body = payload(&s.run_id, s.events, &s.header, s.withheld,
+                           crate::buildenv::snapshot(&s.dir));
         if o.dry_run {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;

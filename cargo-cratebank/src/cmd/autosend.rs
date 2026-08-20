@@ -74,7 +74,8 @@ pub fn run(o: &Common, detach: bool) -> i32 {
     };
     let run_id = s.run_id.clone();
     if already_sent(&run_id) { dbg(&format!("{run_id} already sent")); return 0; }
-    let body = payload(&s.run_id, s.events, &s.header, s.withheld);
+    let body = payload(&s.run_id, s.events, &s.header, s.withheld,
+                           crate::buildenv::snapshot(&s.dir));
     match post(&o.endpoint, &body) {
         Ok(_) => { mark_sent(&run_id); dbg(&format!("sent {run_id} -> {}", o.endpoint)); }
         Err(e) => dbg(&format!("POST failed: {e}")),

@@ -53,9 +53,12 @@ timings** for every compilation unit in the graph, each with its resolved
 features, platform and mode, including rustc's frontend/codegen section
 boundaries.
 
-Not captured yet: `RUSTFLAGS` and the linker in use. Both matter for a build
-census and both live in environment variables and config that can contain local
-paths, so they need a deliberate design rather than a blanket read.
+Plus **build configuration** that cargo's log omits — `RUSTFLAGS`, the linker,
+any compiler wrapper — read from a whitelist of environment variables and
+cargo's resolved config, with every value classified first: flag names and
+non-path values are kept, program paths are reduced to a basename
+(`/usr/local/bin/sccache` → `sccache`), and anything path-shaped is dropped.
+The environment is never read as a whole.
 
 Every unit is keyed by a **compilation class**: a
 `(package, version, features, cone, profile, flags, target)` fingerprint. The

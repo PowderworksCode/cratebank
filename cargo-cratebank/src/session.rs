@@ -159,6 +159,8 @@ pub fn filter_private(events: Vec<Value>, project_public: bool) -> (Vec<Value>, 
 
 /// One parsed session: what to send, and how much was withheld.
 pub struct Session {
+    /// The workspace this session was built in — where its cargo config lives.
+    pub dir: PathBuf,
     pub run_id: String,
     pub events: Vec<Value>,
     pub header: Map<String, Value>,
@@ -195,7 +197,7 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
         h.insert("repository".into(), Value::from(r));   // link a public project properly
     }
     scrub_header(&mut header);
-    Some(Session { run_id, events, header, withheld })
+    Some(Session { dir: PathBuf::from(&ws), run_id, events, header, withheld })
 }
 
 /// One session -> one payload. Raw events pass through verbatim (minus
@@ -205,7 +207,7 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
 /// redaction): cargo's schema is explicitly unstable, so normalising here would
 /// bake in today's shape. Model server-side, log broadly.
 pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
-           withheld: usize) -> Value {
+           withheld: usize, build_env: Value) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
     let sections = events.iter()
         .filter(|e| e["reason"] == "unit-section-finished").count();
@@ -215,8 +217,6 @@ pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
         "cratebank_schema": SCHEMA,
         "client": concat!("cargo-cratebank ", env!("CARGO_PKG_VERSION")),
         "run_id": run_id,
-        // a constant, not a mode: the client cannot send non-public units
-        "public_only": true,
         "env": {
             "host": get("host"), "profile": get("profile"),
             "jobs": get("jobs"), "num_cpus": get("num_cpus"),
@@ -226,6 +226,7 @@ pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
             "ci": std::env::var("CI").is_ok(),
         },
         "repository": repository,
+        "build_env": build_env,
         "counts": {"events": events.len(), "units": units, "sections": sections,
                    // identity, timings and edges of withheld units are absent
                    // entirely; only this count records that they existed

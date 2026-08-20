@@ -27,7 +27,8 @@ pub fn run(o: &Common) -> i32 {
             let Some(s) = read_session(&path) else { continue };
             let rid = s.run_id.clone();
             if already_sent(&rid) { continue; }
-            let body = payload(&s.run_id, s.events, &s.header, s.withheld);
+            let body = payload(&s.run_id, s.events, &s.header, s.withheld,
+                           crate::buildenv::snapshot(&s.dir));
             match post(&o.endpoint, &body) {
                 Ok(_) => {
                     mark_sent(&rid);
