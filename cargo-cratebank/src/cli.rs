@@ -25,14 +25,6 @@ pub struct Common {
     /// Print the exact payload and send nothing
     #[arg(long, global = true)]
     pub dry_run: bool,
-    /// Also send non-public units (only meaningful against your own collector)
-    #[arg(long, global = true)]
-    pub include_private: bool,
-}
-
-impl Common {
-    /// True when non-public units must be dropped (the default).
-    pub fn public_only(&self) -> bool { !self.include_private }
 }
 
 #[derive(Subcommand, Debug)]

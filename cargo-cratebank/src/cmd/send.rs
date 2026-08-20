@@ -17,9 +17,9 @@ pub fn run(o: &Common, a: &SendArgs) -> i32 {
     }
     let mut sent = 0;
     for p in &list {
-        let Some(s) = read_session(p, o.public_only()) else { continue };
+        let Some(s) = read_session(p) else { continue };
         let run_id = s.run_id.clone();
-        let body = payload(&s.run_id, s.events, &s.header, o.public_only(), s.withheld);
+        let body = payload(&s.run_id, s.events, &s.header, s.withheld);
         if o.dry_run {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;

@@ -46,9 +46,13 @@ CRATEBANK_ENDPOINT=http://127.0.0.1:8787/ingest cargo cratebank send
 | `status` | log directory, session count, nightly availability, endpoint, opt-in state |
 | `serve [--port 8787]` | echo collector for testing — prints what it receives |
 
-Flags: `--dry-run` (print the payload, send nothing), `--endpoint URL` (or
-`CRATEBANK_ENDPOINT`), `--include-private` (also send non-public units — only
-meaningful when pointing at a collector you run yourself).
+Flags: `--dry-run` (print the payload, send nothing) and `--endpoint URL` (or
+`CRATEBANK_ENDPOINT`).
+
+There is deliberately **no flag to include non-public units**. Filtering is
+unconditional, so no invocation, misconfiguration or future edit can turn it
+off — a code path that could send private data is a liability even when nobody
+invokes it.
 
 ## Privacy
 
@@ -144,7 +148,7 @@ server-side.
   "cratebank_schema": 1,
   "client": "cargo-cratebank 0.1.0",
   "run_id": "20260820T215558080Z-2437f0c648fa6cb1",
-  "public_only": true,
+  "public_only": true,          // a constant, not a mode
   "repository": null,
   "env": {
     "host": "x86_64-unknown-linux-gnu",

@@ -165,7 +165,12 @@ pub struct Session {
     pub withheld: usize,
 }
 
-pub fn read_session(path: &PathBuf, public_only: bool) -> Option<Session> {
+/// Read one session log, keeping only what may leave the machine.
+///
+/// There is no parameter for this and no flag to override it: non-public units
+/// are dropped, always. A code path that could send them is a liability even
+/// when nobody invokes it, so it does not exist.
+pub fn read_session(path: &PathBuf) -> Option<Session> {
     let f = std::fs::File::open(path).ok()?;
     let mut events = vec![];
     let mut header: Map<String, Value> = Map::new();
@@ -184,9 +189,6 @@ pub fn read_session(path: &PathBuf, public_only: bool) -> Option<Session> {
         events.push(Value::Object(obj));
     }
     if events.is_empty() { return None; }
-    if !public_only {
-        return Some(Session { run_id, events, header, withheld: 0 });
-    }
     let repo = declared_public(std::path::Path::new(&ws));
     let (mut events, withheld) = filter_private(events, repo.is_some());
     if let (Some(r), Some(Value::Object(h))) = (repo.filter(|r| !r.is_empty()), events.first_mut()) {
@@ -202,7 +204,7 @@ pub fn read_session(path: &PathBuf, public_only: bool) -> Option<Session> {
 /// One session -> one payload. Raw events pass through verbatim (minus
 /// redaction): cargo's schema is explicitly unstable, so normalising here would
 /// bake in today's shape. Model server-side, log broadly.
-pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>, redacted: bool,
+pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
            withheld: usize) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
     let sections = events.iter()
@@ -213,7 +215,8 @@ pub fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>, re
         "cratebank_schema": SCHEMA,
         "client": concat!("cargo-cratebank ", env!("CARGO_PKG_VERSION")),
         "run_id": run_id,
-        "public_only": redacted,
+        // a constant, not a mode: the client cannot send non-public units
+        "public_only": true,
         "env": {
             "host": get("host"), "profile": get("profile"),
             "jobs": get("jobs"), "num_cpus": get("num_cpus"),

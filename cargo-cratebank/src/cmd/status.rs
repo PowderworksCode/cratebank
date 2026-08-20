@@ -14,7 +14,7 @@ pub fn run(o: &Common) -> i32 {
     println!("log dir       {}  ({} session log(s))", log_dir().display(), s.len());
     println!("nightly flags {}", if nightly { "available" } else { "NOT available (need nightly)" });
     println!("endpoint      {}", o.endpoint);
-    println!("redaction     {}", if o.public_only() { "on (private units hashed)" } else { "OFF" });
+    println!("privacy       public units only (non-public units are never sent)");
     let here = std::env::current_dir().unwrap_or_default();
     println!("auto-send     {}", if opted_in(&here) { "ON for this project (share = true)" }
                                  else { "off here — run: cargo cratebank enable" });

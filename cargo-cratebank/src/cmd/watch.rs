@@ -24,10 +24,10 @@ pub fn run(o: &Common) -> i32 {
             if already_sent(&run_id) { continue; }
             if !opted_in(std::path::Path::new(&ws)) { mark_sent(&run_id); continue; }
             if !wait_quiet(&path, 2000, 3_600_000) { continue; }
-            let Some(s) = read_session(&path, o.public_only()) else { continue };
+            let Some(s) = read_session(&path) else { continue };
             let rid = s.run_id.clone();
             if already_sent(&rid) { continue; }
-            let body = payload(&s.run_id, s.events, &s.header, o.public_only(), s.withheld);
+            let body = payload(&s.run_id, s.events, &s.header, s.withheld);
             match post(&o.endpoint, &body) {
                 Ok(_) => {
                     mark_sent(&rid);

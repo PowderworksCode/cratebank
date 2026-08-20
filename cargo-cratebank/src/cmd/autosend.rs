@@ -69,12 +69,12 @@ pub fn run(o: &Common, detach: bool) -> i32 {
         wait_for_exit(pid, 3_600_000);
     }
     if !wait_quiet(&newest, 1500, 600_000) { dbg("session never went quiet"); return 0; }
-    let Some(s) = read_session(&newest, o.public_only()) else {
+    let Some(s) = read_session(&newest) else {
         dbg("could not parse session"); return 0;
     };
     let run_id = s.run_id.clone();
     if already_sent(&run_id) { dbg(&format!("{run_id} already sent")); return 0; }
-    let body = payload(&s.run_id, s.events, &s.header, o.public_only(), s.withheld);
+    let body = payload(&s.run_id, s.events, &s.header, s.withheld);
     match post(&o.endpoint, &body) {
         Ok(_) => { mark_sent(&run_id); dbg(&format!("sent {run_id} -> {}", o.endpoint)); }
         Err(e) => dbg(&format!("POST failed: {e}")),
