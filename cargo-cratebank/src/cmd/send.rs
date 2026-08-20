@@ -17,6 +17,7 @@ pub fn run(o: &Common, a: &SendArgs) -> i32 {
         eprintln!("  enable them:  cargo cratebank status");
         return 1;
     }
+    crate::rusage::prune();   // sidecar rusage files older than a day
     let mut sent = 0;
     for p in &list {
         let Some(mut s) = read_session(p) else { continue };

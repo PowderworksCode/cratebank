@@ -28,6 +28,7 @@ pub fn run(o: &Common) -> i32 {
     // the machine happened to be doing once it finished.
     let mut sampling: std::collections::HashMap<String, crate::load::Sampler> = Default::default();
     let mut sampled: std::collections::HashMap<String, Value> = Default::default();
+    crate::rusage::prune();   // sidecar rusage files older than a day
     loop {
         for path in sessions().into_iter().rev() {
             let rid = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();

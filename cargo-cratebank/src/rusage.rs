@@ -67,7 +67,7 @@ pub fn shim(args: &[String]) -> i32 {
     };
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    let mut child = match Command::new(&program).args(&rest).spawn() {
+    let child = match Command::new(&program).args(&rest).spawn() {
         Ok(c) => c,
         Err(_) => return 1,
     };
