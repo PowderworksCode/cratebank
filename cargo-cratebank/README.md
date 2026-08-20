@@ -67,7 +67,8 @@ so the payload never carries an orphaned index.
 | your own workspace crates | **no**, unless you declare the project public |
 | private registries, local paths | never |
 | paths (`cwd`, `workspace_root`, `target_dir`, `manifest_path`) | never |
-| environment variables | never read |
+| environment variables | never read (except the build-config whitelist below) |
+| machine or user identity | never — no id, no hostname, no username |
 | command-line values | replaced with `<arg>`; flag names kept (see below) |
 | source code | never |
 
@@ -97,19 +98,23 @@ recorded **as resolved** rather than as requested:
 | `build` / `check` / `test` | `mode`, per unit |
 | `-Z…` | kept — flag names survive scrubbing |
 
-### Machine identity
+### Machine profile, and no machine id
 
-The census separates *this crate is expensive* from *this machine is slow* with
-a crossed random-effects model, which needs a stable label per machine. That
-label is **random**, generated once, and stored in
-`$CARGO_HOME/cratebank/machine-id` — not derived from a hostname, MAC address,
-username or anything else about you. It groups your own builds together and
-says nothing else. Delete the file and you are a new machine.
+Separating *this crate is expensive* from *this machine is slow* requires
+knowing what a build ran on. It does not require knowing **which** machine, and
+there is deliberately no machine id.
 
-Alongside it: the specs a hardware review would print — CPU model, cores,
-memory to the nearest GB, kernel, OS/arch, virtualization, cargo version, and
-whether `CI` is set. Each is shared by millions of machines. Hostname, user and
-network identity are never read.
+On CI an id would be useless at best — runners are ephemeral, so every job is a
+new machine — and wrong at worst: a cached `$CARGO_HOME` carries the id across
+genuinely different physical runners and groups unrelated hardware under one
+label. On a laptop, a persistent id is exactly the sort of durable per-user
+handle a build tool has no business minting.
+
+So what is sent is a *profile*: CPU model, cores, memory to the nearest GB,
+kernel, OS/arch, virtualization, cargo version, and whether `CI` is set. The
+grouping the statistics want is "a 4-core Linux CI runner", not one ephemeral
+VM, and a profile says that directly while being shared by millions of
+machines. Hostname, user and network identity are never read.
 
 ### Build configuration from the environment
 
@@ -208,7 +213,7 @@ server-side.
   },
   "complete": true,
   "machine": {
-    "machine_id": "b904…", "cpu_model": "AMD EPYC 9554P 64-Core Processor",
+    "cpu_model": "AMD EPYC 9554P 64-Core Processor",
     "cpu_cores": 16, "mem_gb": 63, "kernel": "6.12.93",
     "os": "linux", "arch": "x86_64", "virt": "kvm", "ci": false,
     "cargo_version": "cargo 1.96.1 (356927216 2026-06-26)"

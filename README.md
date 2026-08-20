@@ -53,10 +53,9 @@ timings** for every compilation unit in the graph, each with its resolved
 features, platform and mode, including rustc's frontend/codegen section
 boundaries.
 
-Plus a **machine record** — a random, stored, meaningless id (so one machine's
-builds group together, and nothing else), with CPU model, cores, memory,
-kernel, virtualization and cargo version — and **build configuration** that
-cargo's log omits — `RUSTFLAGS`, the linker,
+Plus a **machine profile** — CPU model, cores, memory, kernel, virtualization,
+cargo version; no machine id, no hostname, no user — and **build
+configuration** that cargo's log omits — `RUSTFLAGS`, the linker,
 any compiler wrapper — read from a whitelist of environment variables and
 cargo's resolved config, with every value classified first: flag names and
 non-path values are kept, program paths are reduced to a basename
