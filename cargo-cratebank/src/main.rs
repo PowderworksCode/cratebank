@@ -16,10 +16,10 @@
 //! Flags: --dry-run (print the exact payload, send nothing), --endpoint URL,
 //!        --keep-private (do NOT redact; only for your own collector).
 //!
-//! Privacy: units from crates.io and public git remotes are sent with identity.
-//! Units from local paths or private registries are sent as opaque stable
-//! hashes with no name — their timings still contribute, their identity never
-//! leaves the machine. Workspace paths, cwd, and target dirs are dropped.
+//! Privacy: only PUBLIC units are uploaded — crates.io and public git remotes,
+//! plus your own workspace units if you declare the project public. Everything
+//! else is dropped entirely: no name, no hash, no timing, no edge. Only a count
+//! of withheld units survives, so the receiver knows the graph is partial.
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -95,14 +95,12 @@ fn is_public(package_id: &str) -> bool {
         || (package_id.starts_with("git+http") && !package_id.contains("@"))
 }
 
-/// Redaction is per-unit, not per-project: a private workspace still contributes
-/// every public dependency measurement in its graph.
-fn redact(mut ev: Map<String, Value>) -> Map<String, Value> {
+/// Strip identifying fields that are never useful and never safe.
+fn scrub_header(ev: &mut Map<String, Value>) {
     for k in ["cwd", "workspace_root", "target_dir", "manifest_path"] {
         ev.remove(k);
     }
     if let Some(Value::Array(cmd)) = ev.get("command") {
-        // keep the shape of the invocation, not its paths or config values
         let kept: Vec<Value> = cmd.iter().filter_map(|a| a.as_str()).enumerate()
             .map(|(i, a)| if i == 0 { "cargo".to_string() }
                  else if a.starts_with('-') { a.to_string() }
@@ -110,48 +108,134 @@ fn redact(mut ev: Map<String, Value>) -> Map<String, Value> {
             .map(Value::from).collect();
         ev.insert("command".into(), Value::Array(kept));
     }
-    if let Some(pid) = ev.get("package_id").and_then(|v| v.as_str()).map(str::to_string) {
-        if !is_public(&pid) {
-            ev.insert("package_id".into(), Value::from(stable_hash(&pid)));
-            ev.insert("private".into(), Value::Bool(true));
-            if let Some(Value::Object(t)) = ev.get_mut("target") {
-                t.insert("name".into(), Value::from("<private>"));
+}
+
+/// Is this project itself public? Workspace units live at `path+…` and are
+/// indistinguishable from private code by source alone, so publishing them
+/// requires saying so: `[package.metadata.cratebank] public = true`.
+fn declared_public(dir: &std::path::Path) -> Option<String> {
+    let mut cur = Some(dir.to_path_buf());
+    while let Some(d) = cur {
+        if let Ok(txt) = std::fs::read_to_string(d.join("Cargo.toml")) {
+            if let Ok(v) = txt.parse::<toml::Value>() {
+                for t in ["package", "workspace"] {
+                    let cb = v.get(t).and_then(|x| x.get("metadata")).and_then(|x| x.get("cratebank"));
+                    if cb.and_then(|x| x.get("public")).and_then(|x| x.as_bool()) == Some(true) {
+                        // link it properly: prefer the declared repository
+                        let repo = cb.and_then(|x| x.get("repository")).and_then(|x| x.as_str())
+                            .or_else(|| v.get("package").and_then(|p| p.get("repository"))
+                                         .and_then(|x| x.as_str()))
+                            .unwrap_or("").to_string();
+                        return Some(repo);
+                    }
+                }
+            }
+        }
+        cur = d.parent().map(|x| x.to_path_buf());
+    }
+    None
+}
+
+/// Drop every private unit and every event that refers to one.
+///
+/// Nothing about non-public code leaves the machine: not a name, not a hash,
+/// not a timing, not an edge. Public dependencies are unaffected, which is
+/// where nearly all of the value is. The only trace is a count of how many
+/// units were withheld, kept so the receiver knows the graph is partial.
+fn filter_private(events: Vec<Value>, project_public: bool) -> (Vec<Value>, usize) {
+    let mut private_ix: std::collections::BTreeSet<i64> = Default::default();
+    for e in &events {
+        if e["reason"] == "unit-registered" {
+            let pid = e["package_id"].as_str().unwrap_or("");
+            let public = is_public(pid) || (project_public && pid.starts_with("path+"));
+            if !public {
+                if let Some(i) = e["index"].as_i64() { private_ix.insert(i); }
             }
         }
     }
-    ev
+    let keep_ix = |v: &Value| v.as_i64().map(|i| !private_ix.contains(&i)).unwrap_or(true);
+    // A public project's own units still carry the builder's local path
+    // (`path+file:///home/me/code/…`). Identity should be the crate in the
+    // repository, never the directory layout of the machine that built it.
+    let canon = |pid: &str| -> String {
+        let Some(rest) = pid.strip_prefix("path+") else { return pid.to_string() };
+        let Some((path, tail)) = rest.split_once('#') else { return "workspace".into() };
+        // cargo writes `#name@version`, or just `#version` when the crate name
+        // equals its directory -- recover the name so identity survives, then
+        // discard the path entirely
+        if tail.contains('@') {
+            format!("workspace#{tail}")
+        } else {
+            let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("crate");
+            format!("workspace#{name}@{tail}")
+        }
+    };
+    let mut out = Vec::with_capacity(events.len());
+    for e in events {
+        let mut o = match e { Value::Object(o) => o, _ => continue };
+        if let Some(i) = o.get("index") {
+            if !keep_ix(i) { continue; }   // the unit itself is private
+        }
+        // edges may point at private units; prune rather than leak the index
+        for arr in ["dependencies", "unblocked"] {
+            if let Some(Value::Array(a)) = o.get(arr) {
+                let pruned: Vec<Value> = a.iter().filter(|x| keep_ix(x)).cloned().collect();
+                o.insert(arr.into(), Value::Array(pruned));
+            }
+        }
+        if let Some(pid) = o.get("package_id").and_then(|v| v.as_str()).map(str::to_string) {
+            if pid.starts_with("path+") { o.insert("package_id".into(), Value::from(canon(&pid))); }
+        }
+        if o.get("reason").and_then(|v| v.as_str()) == Some("build-started") {
+            scrub_header(&mut o);
+        }
+        out.push(Value::Object(o));
+    }
+    (out, private_ix.len())
 }
 
-fn read_session(path: &PathBuf, redact_on: bool) -> Option<(String, Vec<Value>, Map<String, Value>)> {
+fn read_session(path: &PathBuf, redact_on: bool) -> Option<(String, Vec<Value>, Map<String, Value>, usize)> {
     let f = std::fs::File::open(path).ok()?;
     let mut events = vec![];
     let mut header = Map::new();
     let mut run_id = String::new();
+    let mut ws = String::new();
     for line in BufReader::new(f).lines().map_while(Result::ok) {
         let v: Value = serde_json::from_str(&line).ok()?;
-        let mut obj = v.as_object()?.clone();
+        let obj = v.as_object()?.clone();
         if run_id.is_empty() {
             run_id = obj.get("run_id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
         }
         if obj.get("reason").and_then(|v| v.as_str()) == Some("build-started") {
             header = obj.clone();
+            ws = obj.get("workspace_root").and_then(|v| v.as_str()).unwrap_or("").to_string();
         }
-        if redact_on { obj = redact(obj); }
         events.push(Value::Object(obj));
     }
     if events.is_empty() { return None; }
-    Some((run_id, events, header))
+    if !redact_on {
+        return Some((run_id, events, header, 0));
+    }
+    let repo = declared_public(std::path::Path::new(&ws));
+    let (mut events, withheld) = filter_private(events, repo.is_some());
+    if let (Some(r), Some(Value::Object(h))) = (repo.filter(|r| !r.is_empty()), events.first_mut()) {
+        h.insert("repository".into(), Value::from(r));   // link a public project properly
+    }
+    let mut header = header;
+    scrub_header(&mut header);
+    Some((run_id, events, header, withheld))
 }
 
 /// One session -> one payload. Raw events pass through verbatim (minus
 /// redaction): cargo's schema is explicitly unstable, so normalising here would
 /// bake in today's shape. Model server-side, log broadly.
-fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>, redacted: bool) -> Value {
+fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>, redacted: bool,
+           withheld: usize) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
     let sections = events.iter()
         .filter(|e| e["reason"] == "unit-section-finished").count();
     let units = events.iter().filter(|e| e["reason"] == "unit-registered").count();
-    let private = events.iter().filter(|e| e["private"] == Value::Bool(true)).count();
+    let repository = events.first().and_then(|e| e.get("repository")).cloned().unwrap_or(Value::Null);
     json!({
         "cratebank_schema": SCHEMA,
         "client": concat!("cargo-cratebank ", env!("CARGO_PKG_VERSION")),
@@ -165,8 +249,11 @@ fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>, redact
             "timestamp": get("timestamp"),
             "ci": std::env::var("CI").is_ok(),
         },
-        "counts": {"events": events.len(), "units": units,
-                   "sections": sections, "private_units": private},
+        "repository": repository,
+        "counts": {"events": events.len(), "units": units, "sections": sections,
+                   // identity, timings and edges of withheld units are absent
+                   // entirely; only this count records that they existed
+                   "units_withheld": withheld},
         "events": events,
     })
 }
@@ -194,8 +281,8 @@ fn cmd_send(o: &Opts) -> i32 {
     }
     let mut sent = 0;
     for p in &list {
-        let Some((run_id, events, header)) = read_session(p, o.redact) else { continue };
-        let body = payload(&run_id, events, &header, o.redact);
+        let Some((run_id, events, header, withheld)) = read_session(p, o.redact) else { continue };
+        let body = payload(&run_id, events, &header, o.redact, withheld);
         if o.dry_run {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;
@@ -204,8 +291,8 @@ fn cmd_send(o: &Opts) -> i32 {
             Ok(resp) => {
                 sent += 1;
                 let c = &body["counts"];
-                println!("sent {run_id}: {} events, {} units ({} private), {} sections -> {} [{}]",
-                         c["events"], c["units"], c["private_units"], c["sections"],
+                println!("sent {run_id}: {} events, {} units ({} withheld), {} sections -> {} [{}]",
+                         c["events"], c["units"], c["units_withheld"], c["sections"],
                          o.endpoint, resp.trim());
             }
             Err(e) => eprintln!("cratebank: POST {} failed: {e}", o.endpoint),
@@ -431,11 +518,11 @@ fn cmd_autosend(o: &Opts) -> i32 {
         }
     }
     if !wait_quiet(&newest, 1500, 600_000) { dbg("session never went quiet"); return 0; }
-    let Some((run_id, events, header)) = read_session(&newest, o.redact) else {
+    let Some((run_id, events, header, withheld)) = read_session(&newest, o.redact) else {
         dbg("could not parse session"); return 0;
     };
     if already_sent(&run_id) { dbg(&format!("{run_id} already sent")); return 0; }
-    let body = payload(&run_id, events, &header, o.redact);
+    let body = payload(&run_id, events, &header, o.redact, withheld);
     match post(&o.endpoint, &body) {
         Ok(_) => { mark_sent(&run_id); dbg(&format!("sent {run_id} -> {}", o.endpoint)); }
         Err(e) => dbg(&format!("POST failed: {e}")),
@@ -458,15 +545,15 @@ fn cmd_watch(o: &Opts) -> i32 {
             if already_sent(&run_id) { continue; }
             if !opted_in(std::path::Path::new(&ws)) { mark_sent(&run_id); continue; }
             if !wait_quiet(&path, 2000, 3_600_000) { continue; }
-            let Some((rid, events, header)) = read_session(&path, o.redact) else { continue };
+            let Some((rid, events, header, withheld)) = read_session(&path, o.redact) else { continue };
             if already_sent(&rid) { continue; }
-            let body = payload(&rid, events, &header, o.redact);
+            let body = payload(&rid, events, &header, o.redact, withheld);
             match post(&o.endpoint, &body) {
                 Ok(_) => {
                     mark_sent(&rid);
                     let c = &body["counts"];
-                    eprintln!("sent {rid}: {} events, {} units ({} private), {} sections",
-                              c["events"], c["units"], c["private_units"], c["sections"]);
+                    eprintln!("sent {rid}: {} events, {} units ({} withheld), {} sections",
+                              c["events"], c["units"], c["units_withheld"], c["sections"]);
                 }
                 Err(e) => eprintln!("cratebank: POST failed ({e}); will retry"),
             }
@@ -620,9 +707,9 @@ fn cmd_serve(o: &Opts) -> i32 {
         let txt = String::from_utf8_lossy(&buf).to_string();
         let body = txt.splitn(2, "\r\n\r\n").nth(1).unwrap_or("").to_string();
         match serde_json::from_str::<Value>(&body) {
-            Ok(v) => eprintln!("[ingest] run {} · {} events · {} units ({} private) · {} sections · {} · rustc {}",
+            Ok(v) => eprintln!("[ingest] run {} · {} events · {} units ({} withheld) · {} sections · {} · rustc {}",
                 v["run_id"].as_str().unwrap_or("?"),
-                v["counts"]["events"], v["counts"]["units"], v["counts"]["private_units"],
+                v["counts"]["events"], v["counts"]["units"], v["counts"]["units_withheld"],
                 v["counts"]["sections"], v["env"]["host"].as_str().unwrap_or("?"),
                 v["env"]["rustc_version"].as_str().unwrap_or("?")),
             Err(e) => eprintln!("[ingest] {} bytes, not json ({e})", body.len()),

@@ -89,31 +89,27 @@ but weight lower.
 
 ## Privacy
 
-The rule is per-unit, not per-project, and this distinction carries most of
-the dataset:
+**Only public units are uploaded. Nothing else leaves the machine.**
 
-- **public units** (crates.io, public git remotes) upload normally, with full
-  identity. This is the dependency graph, and it is public code no matter who
-  compiles it.
-- **private units** (local paths, private registries, workspace members of a
-  private project) upload **nothing** — no name, no hash, no metrics, no
-  count.
-- **public projects** are additionally linked as themselves: repository,
-  workspace members, their own per-crate costs.
-- **private projects** send no top-level identity at all — no project name, no
-  workspace crate names, no paths, no repository — while still contributing
-  every public dependency measurement in their graph.
+- **public units** (crates.io, public git remotes) upload with full identity.
+  This is the dependency graph, and it is public code no matter who compiles it.
+- **workspace units** are withheld by default — a local path cannot be
+  distinguished from private code by source alone. A project declares itself
+  public to include them, and they are then linked by repository
+  (`workspace#name@version`), never by the local path they were built from.
+- **everything else is dropped entirely**: no name, no hash, no timing, no
+  edge. Every event referencing a withheld unit is removed and every dependency
+  edge pointing at one is pruned, so the payload carries no orphaned indices.
+  A single `units_withheld` count remains, so the receiver knows the graph is
+  partial rather than silently truncated.
 
-A closed-source shop can therefore contribute the bulk of what matters (what
-did tokio, serde, diesel actually cost to compile, in this environment) while
-disclosing nothing about their own code. The only inferable trace of a private
-workspace is an unattributed remainder in a build envelope, and envelopes are
-opt-in separately.
+A closed-source shop therefore contributes the bulk of what matters — what
+tokio, serde and diesel actually cost in this environment — while disclosing
+nothing about its own code.
 
 Never captured, in any tier: source, file paths, environment variables (CI
-environments hold secrets), command lines beyond a whitelist of compiler
-flags, repository identity for non-public projects, usernames, IP-derived
-location.
+environments hold secrets), command lines beyond a whitelist of compiler flags,
+repository identity for undeclared projects, usernames, IP-derived location.
 
 Contribution is opt-in per project or per machine, announced on first use, and
 inspectable: `--dry-run` prints the exact payload. A contributor can request

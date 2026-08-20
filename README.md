@@ -31,13 +31,13 @@ Every unit is keyed by a **compilation class** — a
 the same dependency built by thousands of people is recognisably the same
 individual, which is what makes cross-machine and cross-time comparison work.
 
-**Public projects** are linked as themselves: repository, workspace members,
-their own compile costs.
-
-**Private projects** send their public dependency measurements and no
-top-level identity — no project name, no workspace crate names, no paths.
-Nearly all of the value is in the dependency graph, and that part is public
-code regardless of who is compiling it.
+**Only public units are uploaded.** Public dependencies go with full identity —
+that is public code regardless of who compiles it, and it is where nearly all
+of the value lies. A project's own crates are withheld unless it declares
+itself public, in which case they are linked by repository rather than by the
+path they were built from. Everything else is dropped entirely: no name, no
+hash, no timing, no edge — only a count of withheld units, so the receiver
+knows the graph is partial.
 
 ## Two collection tiers
 

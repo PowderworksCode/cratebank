@@ -64,17 +64,32 @@ safe to leave in place.
 
 ## Privacy
 
-Redaction is **per unit, not per project** — a closed-source workspace still
-contributes every public dependency measurement in its graph while disclosing
-nothing about itself.
+**Only public units are uploaded.** Anything else is dropped entirely — not a
+name, not a hash, not a timing, not a graph edge.
 
-- units from crates.io or public git remotes: sent with full identity;
-- units from local paths or private registries: `package_id` replaced with a
-  stable hash, target name replaced with `<private>`, flagged `private: true`;
-- `cwd`, `workspace_root`, `target_dir`, `manifest_path`: dropped entirely;
-- the command line is reduced to flag names, with every value replaced by
-  `<arg>`;
-- environment variables are never read or sent.
+- **public dependencies** (crates.io, public git remotes): full identity;
+- **your own workspace crates**: withheld by default, because a local path is
+  indistinguishable from private code. Declare the project public to include
+  them:
+
+  ```toml
+  [package.metadata.cratebank]   # or [workspace.metadata.cratebank]
+  share = true
+  public = true
+  repository = "https://github.com/you/project"
+  ```
+
+  Then workspace units are linked by repository as `workspace#name@version` —
+  never by the local path they were built from;
+- **everything else**: dropped, along with every event that referenced it and
+  every dependency edge pointing at it, so no orphaned indices remain. Only a
+  `units_withheld` count survives, so the receiver knows the graph is partial;
+- `cwd`, `workspace_root`, `target_dir`, `manifest_path`: dropped;
+- the command line is reduced to flag names, values replaced with `<arg>`;
+- environment variables are never read.
+
+A closed-source shop contributes what tokio, serde and diesel actually cost in
+their environment, and nothing whatsoever about their own code.
 
 `--dry-run` prints byte-for-byte what would be transmitted.
 
@@ -88,6 +103,7 @@ in the client would bake in today's shape. Capture broadly, model server-side.
 { "cratebank_schema": 1, "client": "cargo-cratebank 0.1.0",
   "run_id": "…", "redacted": true,
   "env": {"host", "profile", "jobs", "num_cpus", "rustc_version", "ci", …},
-  "counts": {"events", "units", "sections", "private_units"},
+  "repository": "… or null",
+  "counts": {"events", "units", "sections", "units_withheld"},
   "events": [ … cargo's JSONL, verbatim … ] }
 ```
