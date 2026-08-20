@@ -1,54 +1,117 @@
 # cargo-cratebank
 
-Opt-in sharing of the build timings you were already producing.
+Opt-in sharing of the build timings you were already producing, for
+[cratebank](../README.md) — a public census of Rust compilation.
 
-Cargo (nightly) already records everything: `-Zbuild-analysis` writes one JSONL
-session log per invocation to `$CARGO_HOME/log/`, and `-Zsection-timings` folds
-rustc's frontend/codegen section boundaries into the same stream. cratebank does
-not instrument anything itself — no wrapper in the compile path, no extra
-builds, no conflict with sccache. It reads those logs, redacts private
-identity, and POSTs them.
+This plugin **instruments nothing**. Cargo already records everything on
+nightly: `-Zbuild-analysis` writes one JSONL session log per invocation to
+`$CARGO_HOME/log/`, and `-Zsection-timings` folds rustc's frontend/codegen
+section boundaries into that same stream. `cargo-cratebank` reads those logs,
+drops everything non-public, and POSTs the rest.
 
+So: nothing in the compile path, no conflict with `sccache` or any other
+`RUSTC_WRAPPER`, no extra builds, and no build ever run on your behalf.
+
+## Requirements
+
+A nightly toolchain — cargo's build-analysis flags are unstable. The config
+keys it writes only emit an unknown-config warning on stable, so they are safe
+to leave in place if you switch back and forth.
+
+## Quickstart
+
+```sh
+cargo install cargo-cratebank        # not yet published; build from this directory
+cd your-project
+cargo cratebank enable               # opt in + turn on cargo's analysis flags
+cargo cratebank status               # confirm everything is wired up
 ```
-cargo cratebank enable                opt this project in to automatic sending
-cargo cratebank watch                 ship every completed session (background)
-cargo cratebank build [cargo args…]   build with both flags on, then send
-cargo cratebank send [--all|--session ID|--since N]
-cargo cratebank status                is everything wired up?
-cargo cratebank serve [--port 8787]   echo collector, for testing
+
+Then look at exactly what would be sent before you send anything:
+
+```sh
+cargo cratebank send --dry-run       # byte-for-byte payload, sends nothing
+cargo cratebank serve                # your own collector, on localhost
+CRATEBANK_ENDPOINT=http://127.0.0.1:8787/ingest cargo cratebank send
 ```
+
+## Commands
+
+| command | what it does |
+| --- | --- |
+| `enable` | writes the opt-in, cargo's analysis flags at the workspace root, and a `build.rs` trigger |
+| `watch` | background: ships every completed session from any opted-in workspace, and clears backlog |
+| `build [cargo args…]` | runs `cargo build` with both flags on, then sends |
+| `send [--all \| --session ID \| --since N]` | ships logs from builds that already happened |
+| `status` | log directory, session count, nightly availability, endpoint, opt-in state |
+| `serve [--port 8787]` | echo collector for testing — prints what it receives |
+
+Flags: `--dry-run` (print the payload, send nothing), `--endpoint URL` (or
+`CRATEBANK_ENDPOINT`), `--include-private` (also send non-public units — only
+meaningful when pointing at a collector you run yourself).
+
+## Privacy
+
+**Only public units are uploaded.** Everything else is dropped entirely — not a
+name, not a hash, not a timing, not a graph edge. Dropping a unit also removes
+every event that referenced it and prunes every dependency edge pointing at it,
+so the payload never carries an orphaned index.
+
+| | uploaded? |
+| --- | --- |
+| public dependencies (crates.io, public git remotes) | yes, full identity |
+| your own workspace crates | **no**, unless you declare the project public |
+| private registries, local paths | never |
+| paths (`cwd`, `workspace_root`, `target_dir`, `manifest_path`) | never |
+| environment variables | never read |
+| command-line values | replaced with `<arg>`; flag names kept |
+| source code | never |
+
+A local path is indistinguishable from private code, so publishing your own
+crates is an explicit choice:
+
+```toml
+[package.metadata.cratebank]   # or [workspace.metadata.cratebank]
+share = true
+public = true
+repository = "https://github.com/you/project"
+```
+
+They are then linked as `workspace#name@version` — by repository, never by the
+path they were built from.
+
+The only trace of withheld code is a `units_withheld` count, kept so a partial
+graph is visibly partial rather than silently truncated. Measured on ripgrep:
+43 public dependency units and 68 section timings uploaded, its 11 workspace
+crates withheld, zero orphaned events, zero dangling edges, no paths anywhere.
+
+Opting out is `share = false`, or deleting the metadata key.
+
+Two structural safety properties: the opt-in must live in **your own**
+manifest, and a manifest inside `CARGO_HOME` (a downloaded dependency) can
+never trigger a send — a published crate cannot enrol its consumers.
 
 ## Automatic sending
 
-`cargo cratebank enable` writes three things: the opt-in
-(`[package.metadata.cratebank] share = true`, or `[workspace.metadata…]` for a
-virtual workspace), the two unstable flags in the **workspace root's**
-`.cargo/config.toml`, and a small `build.rs` trigger. After that, ordinary
-`cargo build` ships its session log — nothing cratebank-shaped in the command.
+`cargo cratebank enable` writes three things: the opt-in, the two unstable
+flags in the **workspace root's** `.cargo/config.toml`, and a small `build.rs`
+trigger. After that an ordinary `cargo build` ships its session log — nothing
+cratebank-shaped in the command.
 
-Two paths, and the difference matters:
+| path | reliability |
+| --- | --- |
+| **`cargo cratebank watch`** (recommended) | sees **every** build, and clears any backlog |
+| **`build.rs` trigger** | **best-effort** — cargo does not guarantee it reruns a build script on every rebuild |
 
-| path | how | reliability |
-| --- | --- | --- |
-| **watcher** (recommended) | `cargo cratebank watch` in the background; ships every completed session from any opted-in workspace, and clears any backlog | sees **every** build |
-| **build.rs trigger** | written by `enable`; spawns a detached helper that waits for the parent cargo to exit, then ships | **best-effort** — cargo does not guarantee it reruns a build script on every rebuild |
+The `build.rs` helper spawns detached and waits for the parent cargo process to
+exit before reading the log. `build.rs` runs *early* in a build, so quiescence
+alone ("the log stopped growing") ships a partial session during a gap between
+slow units — measured as 27 events where the complete session had 61.
 
-The helper waits for the cargo process that spawned it to exit before reading
-the log, because `build.rs` runs early in a build: "the log stopped growing" on
-its own would ship a partial session during a gap between slow units.
+If a send does not happen, `CRATEBANK_DEBUG=1` says why: no opt-in found, not a
+primary package, no session for this workspace, already sent, or a failed POST.
 
-Opt-out is `share = false`, or delete the metadata key. `CRATEBANK_DEBUG=1`
-explains why a send did or did not fire.
-
-Two safety properties worth stating plainly: the opt-in must live in **your
-own** manifest, and a manifest inside `CARGO_HOME` (i.e. a downloaded
-dependency) can never trigger a send — a published crate cannot enrol its
-consumers.
-
-Flags: `--dry-run` (print the exact payload, send nothing), `--endpoint URL`,
-`--keep-private` (skip redaction — for your own collector only).
-
-To record every build, put this in `.cargo/config.toml`:
+What `enable` writes to `.cargo/config.toml`, if you would rather do it by hand:
 
 ```toml
 [unstable]
@@ -59,51 +122,33 @@ section-timings = true
 enabled = true
 ```
 
-On a stable toolchain these only emit an unknown-config warning, so they are
-safe to leave in place.
-
-## Privacy
-
-**Only public units are uploaded.** Anything else is dropped entirely — not a
-name, not a hash, not a timing, not a graph edge.
-
-- **public dependencies** (crates.io, public git remotes): full identity;
-- **your own workspace crates**: withheld by default, because a local path is
-  indistinguishable from private code. Declare the project public to include
-  them:
-
-  ```toml
-  [package.metadata.cratebank]   # or [workspace.metadata.cratebank]
-  share = true
-  public = true
-  repository = "https://github.com/you/project"
-  ```
-
-  Then workspace units are linked by repository as `workspace#name@version` —
-  never by the local path they were built from;
-- **everything else**: dropped, along with every event that referenced it and
-  every dependency edge pointing at it, so no orphaned indices remain. Only a
-  `units_withheld` count survives, so the receiver knows the graph is partial;
-- `cwd`, `workspace_root`, `target_dir`, `manifest_path`: dropped;
-- the command line is reduced to flag names, values replaced with `<arg>`;
-- environment variables are never read.
-
-A closed-source shop contributes what tokio, serde and diesel actually cost in
-their environment, and nothing whatsoever about their own code.
-
-`--dry-run` prints byte-for-byte what would be transmitted.
-
 ## Payload
 
-One session, one POST. Events pass through verbatim (after redaction) under a
-small header, because cargo's log schema is explicitly unstable — normalising
-in the client would bake in today's shape. Capture broadly, model server-side.
+One session, one POST. Events pass through **verbatim** under a small header:
+cargo's log schema is explicitly still evolving, so normalising in the client
+would bake in today's shape and break on every churn. Capture broadly, model
+server-side.
 
 ```json
-{ "cratebank_schema": 1, "client": "cargo-cratebank 0.1.0",
-  "run_id": "…", "redacted": true,
-  "env": {"host", "profile", "jobs", "num_cpus", "rustc_version", "ci", …},
-  "repository": "… or null",
-  "counts": {"events", "units", "sections", "units_withheld"},
-  "events": [ … cargo's JSONL, verbatim … ] }
+{
+  "cratebank_schema": 1,
+  "client": "cargo-cratebank 0.1.0",
+  "run_id": "20260820T215558080Z-2437f0c648fa6cb1",
+  "public_only": true,
+  "repository": null,
+  "env": {
+    "host": "x86_64-unknown-linux-gnu",
+    "profile": "dev", "jobs": 16, "num_cpus": 16, "ci": false,
+    "rustc_version": "1.99.0-nightly",
+    "rustc_version_verbose": "… commit-hash, commit-date, LLVM version …"
+  },
+  "counts": {"events": 338, "units": 43, "sections": 68, "units_withheld": 11},
+  "events": [
+    {"reason": "build-started", "command": ["cargo", "<arg>", "-Zbuild-analysis", …], …},
+    {"reason": "unit-registered", "package_id": "registry+…#aho-corasick@1.1.5",
+     "target": {"name": "aho-corasick", "kind": "lib"}, "dependencies": [12], …},
+    {"reason": "unit-section-finished", "index": 5, "section": "codegen", "elapsed": 0.213},
+    {"reason": "unit-finished", "index": 5, "elapsed": 0.418}
+  ]
+}
 ```

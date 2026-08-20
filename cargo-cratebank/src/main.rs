@@ -14,7 +14,7 @@
 //!   cargo cratebank serve [--port N]      echo collector, for testing
 //!
 //! Flags: --dry-run (print the exact payload, send nothing), --endpoint URL,
-//!        --keep-private (do NOT redact; only for your own collector).
+//!        --include-private (also send non-public units; own collector only).
 //!
 //! Privacy: only PUBLIC units are uploaded — crates.io and public git remotes,
 //! plus your own workspace units if you declare the project public. Everything
@@ -50,7 +50,7 @@ fn parse(mut args: Vec<String>) -> Opts {
     while i < args.len() {
         match args[i].as_str() {
             "--dry-run" => o.dry_run = true,
-            "--keep-private" => o.redact = false,
+            "--include-private" => o.redact = false,
             "--all" => o.all = true,
             "--endpoint" => { o.endpoint = args.get(i + 1).cloned().unwrap_or_default(); i += 1 }
             "--session" => { o.session = args.get(i + 1).cloned(); i += 1 }
@@ -240,7 +240,7 @@ fn payload(run_id: &str, events: Vec<Value>, header: &Map<String, Value>, redact
         "cratebank_schema": SCHEMA,
         "client": concat!("cargo-cratebank ", env!("CARGO_PKG_VERSION")),
         "run_id": run_id,
-        "redacted": redacted,
+        "public_only": redacted,
         "env": {
             "host": get("host"), "profile": get("profile"),
             "jobs": get("jobs"), "num_cpus": get("num_cpus"),
@@ -742,7 +742,7 @@ fn main() {
             eprintln!("  cargo cratebank serve [--port 8787]   echo collector for testing\n");
             eprintln!("  --dry-run        print the exact payload, send nothing");
             eprintln!("  --endpoint URL   default {DEFAULT_ENDPOINT}\n                   (testing: cargo cratebank serve, then --endpoint http://127.0.0.1:8787/ingest)");
-            eprintln!("  --keep-private   do not redact private units (own collector only)");
+            eprintln!("  --include-private  also send non-public units (your own collector only)");
             2
         }
     })
