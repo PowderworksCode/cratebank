@@ -1,4 +1,4 @@
-# Contributed builds
+# Collection
 
 Volunteers contribute the builds they are **already running** — CI pipelines,
 local `cargo build`, `cargo check` on save. No extra compilation, no separate
@@ -89,12 +89,26 @@ but weight lower.
 
 ## Privacy
 
-**Only classes whose source is public are uploaded.** `source_id` distinguishes
-crates.io and public git remotes from local paths and private registries.
-Public units upload normally. Everything else uploads **nothing** — no names,
-no hashes, no metrics, no counts. A private workspace crate is invisible; its
-existence is inferable only as an unattributed gap in a project envelope, and
-project envelopes are opt-in separately from unit measurements.
+The rule is per-unit, not per-project, and this distinction carries most of
+the dataset:
+
+- **public units** (crates.io, public git remotes) upload normally, with full
+  identity. This is the dependency graph, and it is public code no matter who
+  compiles it.
+- **private units** (local paths, private registries, workspace members of a
+  private project) upload **nothing** — no name, no hash, no metrics, no
+  count.
+- **public projects** are additionally linked as themselves: repository,
+  workspace members, their own per-crate costs.
+- **private projects** send no top-level identity at all — no project name, no
+  workspace crate names, no paths, no repository — while still contributing
+  every public dependency measurement in their graph.
+
+A closed-source shop can therefore contribute the bulk of what matters (what
+did tokio, serde, diesel actually cost to compile, in this environment) while
+disclosing nothing about their own code. The only inferable trace of a private
+workspace is an unattributed remainder in a build envelope, and envelopes are
+opt-in separately.
 
 Never captured, in any tier: source, file paths, environment variables (CI
 environments hold secrets), command lines beyond a whitelist of compiler
@@ -134,7 +148,26 @@ alongside the archival round, tagged `source = archival | contributed` and
 `capture = clean | cached | incremental`, with fitted `speed_j` retained so
 anyone can re-derive normalised costs.
 
-## What this buys that the archival round cannot
+## The build-environment census
+
+Per-unit timings are half the product. The other half is the **environment
+snapshot** attached to every build, which by itself answers questions nobody
+can currently answer about the Rust ecosystem:
+
+- what fraction of real builds use lld, mold, or the default linker?
+- what opt-levels, debuginfo settings, codegen-units, LTO modes are actually
+  in use — as opposed to what documentation recommends?
+- how many jobs do real machines run, on how many cores, and how contended?
+- what is sccache adoption, and what hit rates do people actually get?
+- which targets matter by volume; how fast do toolchain versions propagate?
+- how do these distributions differ between CI and developer laptops?
+
+Existing sources are self-reported (the annual survey), synthetic
+(rustc-perf), or about consumption rather than compilation (crates.io download
+counts). A measured, ongoing census of build environments is new, useful to
+the Rust project itself, and falls out of collection for free.
+
+## What this buys that a controlled fleet cannot
 
 - **Platform and configuration coverage**: Windows, macOS, ARM, real feature
   combinations, real profiles — a single Linux box will never see them.
@@ -147,5 +180,22 @@ anyone can re-derive normalised costs.
 - **The incremental corpus**: the phenomenon v1 postpones arrives as a
   byproduct, at a scale no controlled study could fund.
 
-It does not replace the archival round, which remains the calibrated,
-deeply-instrumented, uniform-policy backbone. Contribution is breadth on top.
+## Honest limits
+
+- **Observational, not causal.** This data can say what correlates with cost
+  in the wild; it cannot say what *causes* it. Causal claims come from
+  designed synthetic experiments (crategen) and are checked against this
+  cohort's residuals — the model-organism arrangement, not a substitute for
+  it.
+- **Self-selected.** Contributors will skew toward CI-heavy, larger, and
+  more tooling-aware projects, and toward developer-grade hardware.
+  Population statements need weighting and honest caveats; per-class cost
+  estimates are far more robust, since they lean on overlap rather than
+  representativeness.
+- **Tier-1 data is wall clock**, so it carries a contention term; tier-2 shim
+  data is real CPU. Both are usable, but never pooled without the tier flag.
+- **A controlled run is still worth having** as a calibration anchor and for
+  deep instrumentation (self-profile, mono stats) that is too heavy to ask of
+  contributors. It is now optional and secondary rather than the backbone —
+  common dependencies compiled on thousands of machines are themselves a
+  strong anchor.
