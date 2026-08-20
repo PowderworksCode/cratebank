@@ -49,6 +49,8 @@ code regardless of who is compiling it.
 Caches are handled honestly: a wrapper hit is recorded as a cache event with
 no timing claim, a miss is a genuine compile and measured as one.
 
+**cratebank.io** — the census is public: data, queries, and the client.
+
 | repo | role |
 | --- | --- |
 | **cratebank** (this) | the census: schema, collection design, ingest, publication |
@@ -60,3 +62,10 @@ no timing claim, a miss is a genuine compile and measured as one.
 - [`docs/collection.md`](docs/collection.md) — what is captured, privacy, tiers, contamination flags
 - [`docs/schema.md`](docs/schema.md) — the event log and the class fingerprint
 - [`docs/capture-manifest.md`](docs/capture-manifest.md) — the exhaustive field list, including deep-instrumentation fields for controlled runs
+
+## Client
+
+[`cargo-cratebank/`](cargo-cratebank/) — the plugin. `cargo cratebank build`
+runs your build with cargo's own `-Zbuild-analysis` and `-Zsection-timings`
+enabled and ships the resulting session log; `cargo cratebank send` ships logs
+from builds that already happened. Nothing instruments the compile path.
