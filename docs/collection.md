@@ -148,7 +148,9 @@ anyone can re-derive normalised costs.
 
 Per-unit timings are half the product. The other half is the **environment
 snapshot** attached to every build, which by itself answers questions nobody
-can currently answer about the Rust ecosystem:
+can currently answer about the Rust ecosystem. Some of these need capture that
+does not exist yet — the linker and `RUSTFLAGS` are not recorded by cargo's log
+and are noted below as future work:
 
 - what fraction of real builds use lld, mold, or the default linker?
 - what opt-levels, debuginfo settings, codegen-units, LTO modes are actually

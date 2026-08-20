@@ -68,7 +68,7 @@ so the payload never carries an orphaned index.
 | private registries, local paths | never |
 | paths (`cwd`, `workspace_root`, `target_dir`, `manifest_path`) | never |
 | environment variables | never read |
-| command-line values | replaced with `<arg>`; flag names kept |
+| command-line values | replaced with `<arg>`; flag names kept (see below) |
 | source code | never |
 
 A local path is indistinguishable from private code, so publishing your own
@@ -83,6 +83,25 @@ repository = "https://github.com/you/project"
 
 They are then linked as `workspace#name@version` — by repository, never by the
 path they were built from.
+
+Scrubbing the command line costs nothing, because cargo already records the
+same information in structured form — and in better form, since features are
+recorded **as resolved** rather than as requested:
+
+| dropped from the command line | already in the log |
+| --- | --- |
+| `-j N` | `jobs`, alongside `num_cpus` |
+| `--target <triple>` | `platform`, per unit |
+| `--features` / `--all-features` | `features`, per unit, resolved |
+| `--release` / `--profile` | `profile` |
+| `build` / `check` / `test` | `mode`, per unit |
+| `-Z…` | kept — flag names survive scrubbing |
+
+What is genuinely *not* captured today, by cargo or by us: `RUSTFLAGS` and the
+linker in use. Both affect compile time and both belong in a build-environment
+census, but they live in environment variables and config that can contain
+local paths, so capturing them needs a deliberate design rather than a blanket
+read. Tracked as future work.
 
 The only trace of withheld code is a `units_withheld` count, kept so a partial
 graph is visibly partial rather than silently truncated. Measured on ripgrep:

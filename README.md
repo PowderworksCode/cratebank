@@ -47,10 +47,15 @@ Opting out is `share = false`, or deleting the metadata key.
 
 ## What is collected
 
-Per build, a **build-environment snapshot** — toolchain, target, profile,
-linker, jobs and cores, cache/wrapper state, CI or local — plus **per-unit
-timings** for every compilation unit in the graph, including rustc's
-frontend/codegen section boundaries.
+Per build, a **build-environment snapshot** — toolchain (with commit hash and
+LLVM version), target, profile, jobs and cores, CI or local — plus **per-unit
+timings** for every compilation unit in the graph, each with its resolved
+features, platform and mode, including rustc's frontend/codegen section
+boundaries.
+
+Not captured yet: `RUSTFLAGS` and the linker in use. Both matter for a build
+census and both live in environment variables and config that can contain local
+paths, so they need a deliberate design rather than a blanket read.
 
 Every unit is keyed by a **compilation class**: a
 `(package, version, features, cone, profile, flags, target)` fingerprint. The
