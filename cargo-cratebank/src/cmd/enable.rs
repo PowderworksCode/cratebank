@@ -85,7 +85,43 @@ pub fn run(o: &Common) -> i32 {
     if o.dry_run { eprintln!("\ncratebank: dry run, nothing written"); return 0; }
     if changed.is_empty() { println!("cratebank: already enabled here."); }
     else { for c in &changed { println!("  + {c}"); } }
-    println!("\nEvery `cargo build` on a nightly toolchain will now ship its session log to\n{}\nafter the build finishes. Disable any time with  share = false.", o.endpoint);
+
+    println!("\nEvery `cargo build` on a nightly toolchain will now ship its session log to\n\
+              {}\nafter the build finishes. Disable any time with  share = false.", o.endpoint);
+    explain_machine_id(&dir);
     0
+}
+
+/// Enablement is the moment to say what identifies these builds — before any
+/// data moves, not after somebody finds an id in a payload.
+fn explain_machine_id(dir: &std::path::Path) {
+    println!("\n  Who these builds are from");
+    println!("  ------------------------");
+    match crate::machine::machine_id_with(Some(dir), false) {
+        None => {
+            println!("  No machine id is being sent (machine_id is set to `none`).");
+            println!("  Your builds will be counted, but not attributed to anyone.");
+        }
+        Some(id) => {
+            let chosen = std::env::var("CRATEBANK_MACHINE_ID").is_ok()
+                || crate::machine::configured_id(dir).is_some();
+            if chosen {
+                println!("  Your builds will be attributed to  {id}");
+            } else {
+                println!("  A random machine id was generated for you:  {id}");
+                println!("  It links your own sessions together — which is what allows");
+                println!("  comparisons like \"did this crate get slower on the same machine?\"");
+                println!();
+                println!("  If you would rather take credit for the work, name yourself:");
+                println!();
+                println!("      [package.metadata.cratebank]   # or [workspace.metadata…]");
+                println!("      machine_id = \"your-org\"");
+                println!();
+                println!("  On CI, set CRATEBANK_MACHINE_ID instead — a fresh runner would");
+                println!("  otherwise invent a new random id on every job.");
+            }
+            println!("  Send no id at all with  machine_id = \"none\".");
+        }
+    }
 }
 

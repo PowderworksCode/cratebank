@@ -41,6 +41,12 @@ fn id_file() -> PathBuf { cargo_home().join("cratebank").join("machine-id") }
 /// Resolve the machine id, generating and announcing one on first use.
 /// `None` means the user asked for no id at all.
 pub fn machine_id(project_dir: Option<&std::path::Path>) -> Option<String> {
+    machine_id_with(project_dir, true)
+}
+
+/// `announce = false` for callers that explain the id themselves (enable does,
+/// at more length and better placed than a one-line notice).
+pub fn machine_id_with(project_dir: Option<&std::path::Path>, announce: bool) -> Option<String> {
     let normalise = |v: String| {
         let v = v.trim().to_string();
         if v.is_empty() || v == "none" { None } else { Some(v) }
@@ -58,7 +64,7 @@ pub fn machine_id(project_dir: Option<&std::path::Path>) -> Option<String> {
     let id = random_id();
     let p = id_file();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
-    if std::fs::write(&p, &id).is_ok() {
+    if std::fs::write(&p, &id).is_ok() && announce {
         eprintln!("cratebank: generated machine id {id}\n  stored in {}\n  \
                    edit that file, or set CRATEBANK_MACHINE_ID, to use your own \
                    (e.g. your org's name); set it to `none` to send no id.",
@@ -68,7 +74,7 @@ pub fn machine_id(project_dir: Option<&std::path::Path>) -> Option<String> {
 }
 
 /// `[package.metadata.cratebank] machine_id = "acme-ci"`, searched upward.
-fn configured_id(dir: &std::path::Path) -> Option<String> {
+pub fn configured_id(dir: &std::path::Path) -> Option<String> {
     let mut cur = Some(dir.to_path_buf());
     while let Some(d) = cur {
         if let Ok(txt) = std::fs::read_to_string(d.join("Cargo.toml")) {

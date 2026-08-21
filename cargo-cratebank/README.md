@@ -128,10 +128,28 @@ rather than tracking — and on ephemeral CI a random id would be a fresh
 meaningless value every job anyway. Set it to `none` (or empty) and no id is
 sent at all.
 
-On first use the client generates a random id, writes it to
-`$CARGO_HOME/cratebank/machine-id`, and **tells you it did**, with the path and
-how to change it. `cargo cratebank status` shows the current id and where it
-came from.
+`cargo cratebank enable` says all of this at the moment you opt in — before any
+data moves, not after somebody finds an id in a payload:
+
+```
+  Who these builds are from
+  ------------------------
+  A random machine id was generated for you:  d9fdc164f7f16f8b4393…
+  It links your own sessions together — which is what allows
+  comparisons like "did this crate get slower on the same machine?"
+
+  If you would rather take credit for the work, name yourself:
+
+      [package.metadata.cratebank]   # or [workspace.metadata…]
+      machine_id = "your-org"
+
+  On CI, set CRATEBANK_MACHINE_ID instead — a fresh runner would
+  otherwise invent a new random id on every job.
+  Send no id at all with  machine_id = "none".
+```
+
+If you have already named yourself it says so instead, and
+`cargo cratebank status` always shows the current id and where it came from.
 
 Alongside it, a *profile*: CPU model, cores, memory to the nearest GB, kernel,
 OS/arch, virtualization, cargo version, and whether `CI` is set — each shared by
