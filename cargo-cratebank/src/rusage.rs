@@ -114,6 +114,137 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
 
 /// The wrapper entry point. Must stay cheap and must never break a build:
 /// any failure here still runs the compiler and still returns its status.
+/// Rewrite `--emit` so rustc leaves behind an artifact at every phase
+/// boundary, and keep the intermediates it would otherwise delete.
+///
+/// This is the whole measurement. rustc writes each artifact the moment the
+/// phase that produces it finishes, so the file mtimes *are* the phase
+/// timeline -- no profiler, no nightly flag, no second compilation, and
+/// nothing that needs privileges on any platform.
+///
+///   .d              parse + macro expansion
+///   .rmeta          typecheck, borrowck, MIR build, metadata
+///   .rlib/.dylib    codegen, LLVM, archive/link
+///
+/// Only `metadata` is added, and only because cargo omits it for proc-macro
+/// crates. Everything else is an artifact the build was going to write
+/// anyway, so the measurement costs nothing.
+///
+/// `-Csave-temps` would add three backend boundaries (IR generation, LLVM
+/// optimisation, object emission) by keeping the per-codegen-unit bitcode.
+/// Measured across a whole build it costs **+83%** -- it writes bitcode for
+/// every CGU of every crate -- so it is not worth it for a boundary the
+/// frontend dwarfs anyway. Measured on a single unit it looks free; that
+/// measurement was wrong.
+///
+/// `metadata` is added unconditionally because cargo omits it for
+/// `--crate-type proc-macro` (nothing links against a proc-macro's
+/// interface), which would leave proc-macro crates with no boundary between
+/// typecheck and codegen. Asking for it anyway measured free.
+fn augment_emit(args: &[String]) -> Vec<String> {
+    // Only `metadata`. It is free -- rustc is already holding what it
+    // serialises -- and it is the one cargo omits for proc-macro crates.
+    //
+    // `mir`, `llvm-ir` and `obj` were tried and removed: they write textual
+    // dumps, which measured +119% across a whole build, and bought a single
+    // 36ms boundary between "MIR optimised" and "metadata written". The
+    // interesting frontend blob is not split by any of them. `-Csave-temps`
+    // gives the backend boundaries for nothing instead.
+    const WANT: [&str; 1] = ["metadata"];
+    let mut out = Vec::with_capacity(args.len() + 1);
+    let mut saw_emit = false;
+    for a in args {
+        match a.strip_prefix("--emit=") {
+            Some(list) => {
+                saw_emit = true;
+                let mut kinds: Vec<&str> = list.split(',').filter(|k| !k.is_empty()).collect();
+                for w in WANT {
+                    if !kinds.contains(&w) {
+                        kinds.push(w);
+                    }
+                }
+                out.push(format!("--emit={}", kinds.join(",")));
+            }
+            None => out.push(a.clone()),
+        }
+    }
+    let _ = saw_emit;
+    out
+}
+
+/// Wall-clock offset, in seconds from `started`, of every artifact this unit
+/// produced. Raw offsets rather than computed phase durations: the ordering is
+/// not fixed (requesting `mir` moves `.rmeta` after it), and this project's
+/// whole premise is that parsing happens later and can be corrected, while
+/// measurement happens once.
+fn artifact_times(args: &[String], started: f64) -> Value {
+    let (Some(dir), Some(name)) = (
+        arg_value(args, "--out-dir"),
+        arg_value(args, "--crate-name"),
+    ) else {
+        return Value::Null;
+    };
+    // Artifacts are named `{crate}{extra}` or `lib{crate}{extra}`, except the
+    // per-codegen-unit files, whose hash is not predictable -- so match on the
+    // stem rather than trying to reconstruct every filename.
+    let extra = codegen_value(args, "extra-filename").unwrap_or_default();
+    let stem = format!("{name}{extra}");
+    let mut out = serde_json::Map::new();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Value::Null;
+    };
+    for e in rd.flatten() {
+        let fname = e.file_name().to_string_lossy().to_string();
+        if !fname.starts_with(&stem) && !fname.starts_with(&format!("lib{stem}")) {
+            continue;
+        }
+        let Ok(t) = e.metadata().and_then(|m| m.modified()).and_then(|m| {
+            m.duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)
+        }) else {
+            continue;
+        };
+        let off = t.as_secs_f64() - started;
+        // Stale artifacts from an earlier build would poison the timeline.
+        if off < 0.0 {
+            continue;
+        }
+        // Key by the distinguishing suffix, not the full name: the caller
+        // wants "when was the object file written", not which CGU it was.
+        let key = if fname.ends_with(".d") {
+            "d"
+        } else if fname.ends_with(".mir") {
+            "mir"
+        } else if fname.ends_with(".rmeta") {
+            "rmeta"
+        } else if fname.ends_with("no-opt.bc") {
+            "no_opt_bc"
+        } else if fname.ends_with(".bc") {
+            "bc"
+        } else if fname.ends_with(".o") {
+            "o"
+        } else if fname.ends_with(".rlib") || fname.ends_with(".dylib") || fname.ends_with(".so") {
+            "lib"
+        } else {
+            continue;
+        };
+        // Several codegen units write the same kind; keep the last, which is
+        // when that phase actually finished for the unit as a whole.
+        let keep = out
+            .get(key)
+            .and_then(Value::as_f64)
+            .is_none_or(|prev| off > prev);
+        if keep {
+            out.insert(key.into(), json!((off * 1e6).round() / 1e6));
+        }
+    }
+    if out.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(out)
+    }
+}
+
 pub fn shim(args: &[String]) -> i32 {
     if args.is_empty() {
         return 1;
@@ -127,10 +258,25 @@ pub fn shim(args: &[String]) -> i32 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+
+    // Every compilation is instrumented. The shim itself is opt-in (it only
+    // runs as RUSTC_WRAPPER), so if it is in the path, phases are wanted --
+    // there is no cheaper mode to fall back to, because this one is already
+    // ~6% and works on every toolchain and platform.
+    let rest = augment_emit(&rest);
+
     let mut child = match Command::new(&program).args(&rest).spawn() {
         Ok(c) => c,
         Err(_) => return 1,
     };
+    // The join key for an external sampler. Every compilation unit is its own
+    // rustc process, and a profiler records a pid on every sample -- so
+    // samples attribute to units exactly, however many run concurrently.
+    // Attributing by time window instead would be hopeless on a -j12 build.
+    //
+    // Paired with `started` because pids are reused; the pair is unique.
+    let child_pid = child.id();
+
     let (code, user, sys, maxrss) = wait_rusage(&mut child);
     #[cfg(unix)]
     std::mem::forget(child); // wait4 already reaped it
@@ -142,18 +288,28 @@ pub fn shim(args: &[String]) -> i32 {
             "extra_filename": codegen_value(args, "extra-filename"),
             "crate_type": arg_value(args, "--crate-type"),
             "started": started,
+            "pid": child_pid,
             "cpu_user_s": user, "cpu_sys_s": sys, "max_rss_kb": maxrss,
             "rc": code,
+            // Raw artifact offsets; phases are differences, computed later.
+            "artifacts": artifact_times(args, started),
         });
         let dir = sidecar_dir();
         if std::fs::create_dir_all(&dir).is_ok() {
-            let f = dir.join(format!("{}.jsonl", std::process::id() / 1000));
+            // One file per invocation, keyed on the full pid. It used to group
+            // by `pid / 1000`, which meant the many rustc processes cargo runs
+            // in parallel appended to the same file -- and an append is only
+            // atomic per write syscall, so records interleaved and produced
+            // torn JSON. Rare with small records; reliable once pass timings
+            // made them kilobytes. Whole-line writes make it a single syscall;
+            // separate files make it impossible.
+            let f = dir.join(format!("{}.jsonl", std::process::id()));
             if let Ok(mut fh) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(f)
             {
-                let _ = writeln!(fh, "{rec}");
+                let _ = fh.write_all(format!("{rec}\n").as_bytes());
             }
         }
     }
@@ -237,6 +393,9 @@ pub fn merge(events: &mut [Value], window: (f64, f64)) -> (usize, usize) {
             if let Some(o) = ev.as_object_mut() {
                 o.insert("cpu_s".into(), json!(u + s));
                 o.insert("max_rss_kb".into(), r["max_rss_kb"].clone());
+                if !r["artifacts"].is_null() {
+                    o.insert("artifacts".into(), r["artifacts"].clone());
+                }
             }
             matched += 1;
         }
