@@ -129,29 +129,48 @@ When it is time, the path is already designed:
 [`registration.md`](registration.md) for self-serve keys, and Access service
 tokens for organisations that want a credential they can rotate and audit.
 
-## Two streams, because rows should be rows
+## One stream, stored verbatim
 
-The client currently sends **one object per build**, with the events nested
-inside it. That shape is wrong for columnar storage: the interesting unit of
-analysis is a compilation unit, and a nested array of 300 events is neither
-queryable nor compressible as one.
+An earlier draft of this document had the client flatten each build into
+`sessions` and `units` rows, on the theory that a nested array of 300 events is
+not a columnar row. That was wrong twice over.
 
-| stream | one row per | sink | contents |
-| --- | --- | --- | --- |
-| `sessions` | build | parquet | run id, machine profile, build env, load, counts, `complete` |
-| `units` | compilation unit | parquet | run id, package id, features, platform, mode, timings, section splits, cpu, rss, artifact bytes |
-| `raw` | build | JSON | the verbatim event log, for reprocessing |
+**Pipelines cannot do it.** Its SQL has `WITH`, `SELECT`, `WHERE` and `UNNEST`,
+but no joins and no aggregation. `UNNEST(events)` produces one row per *event*,
+and our events are heterogeneous — `unit-registered` carries the package id and
+features, `unit-finished` carries elapsed time, `unit-section-finished` carries
+the frontend/codegen split — all correlated by `index`. One row per unit is a
+self-join, which is not on the menu.
 
-`sessions` and `units` are the analytics tables and map directly onto
-`docs/schema.md`. `raw` exists because cargo's log schema is explicitly still
-evolving and our *extraction* will improve after the fact — the collection
-principle is that measurement happens once and parsing happens forever, so the
-bytes we parsed must remain. Pipelines supports a JSON sink, so this costs a
-stream rather than a service.
+**Nor should it.** Streams can be **unstructured**: a single `value` column
+holding any valid JSON, no validation. And structured streams have a property
+that settles the argument — *"schema modifications are not supported after
+stream creation"*. Declaring a schema today freezes today's field names into
+infrastructure we cannot alter, while cargo's log format is explicitly still
+moving and every field it gains would be silently dropped. That is exactly the
+mistake this project's collection principle exists to prevent: measurement
+happens once, parsing happens forever.
 
-Duplicating session columns onto every unit row is deliberate: parquet
-dictionary-encodes them to near nothing, and it removes a join from every
-query anyone will ever write.
+So v1 is one unstructured stream, one R2 sink, and no transform SQL at all:
+
+```
+cargo-cratebank ──POST──▶ [stream: unstructured] ──▶ [sink: R2 parquet, zstd] ──▶ r2://cratebank/raw/
+```
+
+The payload lands as one row per build with its JSON intact. Nothing is
+interpreted at ingest, so nothing can be lost by interpreting it wrongly.
+
+### Where the tables come from
+
+The `sessions` and `units` tables in `schema.md` are **derived**, built by the
+stratum job — which runs DuckDB, and therefore has joins, aggregation and window
+functions. Correlating `unit-registered` with `unit-finished` by index is a
+one-line join there and impossible in streaming SQL.
+
+That is the right division: ingest keeps bytes, analysis makes tables, and the
+table definitions can be rewritten and rerun over the whole archive whenever our
+understanding improves. A flattening decision baked into a Pipelines statement
+could only ever be applied going forward.
 
 ## Limits, and the one that binds
 
@@ -162,10 +181,10 @@ Measured against real payloads: ~398 bytes per event, so a 1,000-unit build
 projects to **≈3.0 MB in one request** — under the limit, but not by much, and
 the fleet's largest projects are that size. Two consequences:
 
-1. the client must **batch**: split rows into arrays under ~4 MB and POST them
-   in sequence. Arrays make this trivial and rows are independent;
-2. the flattened `units` shape helps here too — it is far more compact than the
-   raw event stream it replaces.
+The client must **batch**: split oversized builds across several requests. This
+is the only client change v1 needs — a session's events are independent rows in
+the array, so splitting is mechanical, and the session header rides with each
+chunk so partial delivery is still interpretable.
 
 The 5 MB/s per-stream ingest rate is the one to watch at scale: it is roughly
 150 medium builds per second, which is a long way off, but it is a per-stream
@@ -186,9 +205,8 @@ Which produces exactly the layout the schema doc assumed:
 
 ```
 cratebank/
-  units/year=2026/month=09/day=03/*.parquet
-  sessions/year=2026/month=09/day=03/*.parquet
-  raw/year=2026/month=09/day=03/*.json
+  raw/year=2026/month=09/day=03/*.parquet     # what arrived, verbatim
+  2026-09/tables/{sessions,units,classes}.parquet   # derived by the stratum job
 ```
 
 Hive-style partitioning is what every engine expects, so
@@ -232,14 +250,9 @@ Requires a Workers Paid plan ($5/month).
 
 ## What has to change in the client
 
-If ingest goes straight to Pipelines: emit rows rather than one nested object,
-batch under 5 MB, and take an endpoint per stream.
+**Batching, and nothing else.** The payload shape stays as it is, because the
+stream stores it verbatim. Split builds larger than ~4 MB across several
+requests, keep the session header on each chunk, and that is the whole change.
 
-**If a Worker fronts it — the recommendation above — almost none of that.** The
-client keeps its current payload, gains an `Authorization` header, and the
-Worker does the flattening and batching. That is the better division of labour:
-schema changes ship at our deploy cadence rather than at the rate contributors
-upgrade a CLI.
-
-Either way `--dry-run` keeps printing exactly what would be sent, and
+`--dry-run` keeps printing exactly what would be sent, and
 `cargo cratebank serve` remains the reference collector.
