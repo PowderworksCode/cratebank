@@ -9,5 +9,11 @@ output "stream_endpoint" {
 }
 
 output "bucket" {
-  value = cloudflare_r2_bucket.cratebank.name
+  description = "Raw payloads land here"
+  value       = cloudflare_r2_bucket.cratebank.name
+}
+
+output "published_bucket" {
+  description = "Compaction writes tables here"
+  value       = cloudflare_r2_bucket.published.name
 }

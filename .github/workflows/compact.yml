@@ -1,0 +1,40 @@
+name: compact
+
+# Collate what has arrived into tables worth querying, and publish them.
+#
+# Hourly rather than continuous: the sink rolls files every five minutes, and
+# the job replaces the published tables wholesale, so running it more often
+# would cost the same work for fresher-by-minutes data nobody is waiting on.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the tables and report, write nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  # A second run would rebuild the same tables from the same raw bucket and
+  # race the first one's writes. Let the in-flight one finish.
+  group: compact
+  cancel-in-progress: false
+
+jobs:
+  compact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r compact/requirements.txt
+      - run: python compact/compact.py ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          CRATEBANK_R2_ACCOUNT_ID: ${{ secrets.CRATEBANK_R2_ACCOUNT_ID }}
+          CRATEBANK_R2_ACCESS_KEY_ID: ${{ secrets.CRATEBANK_R2_ACCESS_KEY_ID }}
+          CRATEBANK_R2_SECRET_ACCESS_KEY: ${{ secrets.CRATEBANK_R2_SECRET_ACCESS_KEY }}
+          CRATEBANK_RAW_BUCKET: ${{ vars.CRATEBANK_RAW_BUCKET || 'cratebank' }}
+          CRATEBANK_PUBLISHED_BUCKET: ${{ vars.CRATEBANK_PUBLISHED_BUCKET || 'cratebank-published' }}

@@ -30,6 +30,16 @@ resource "cloudflare_r2_bucket" "cratebank" {
   location   = var.bucket_location
 }
 
+# Derived tables live in their own bucket: raw is append-only and never
+# rewritten, published is replaced wholesale on every compaction run and is
+# safe to delete. Keeping them apart is what makes the compaction SQL
+# disposable -- a wrong reading is rerun, not recovered.
+resource "cloudflare_r2_bucket" "published" {
+  account_id = var.account_id
+  name       = "${var.bucket_name}-published"
+  location   = var.bucket_location
+}
+
 # ── ingest ───────────────────────────────────────────────────────────────────
 
 # Unstructured: a single `value` column holding whatever JSON arrives.
