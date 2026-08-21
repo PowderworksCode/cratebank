@@ -10,8 +10,9 @@ variable "account_id" {
 }
 
 variable "zone_id" {
-  description = "Zone id for cratebank.io"
+  description = "Zone id for cratebank.io. Leave empty to skip the CNAME and use the raw Cloudflare endpoint -- useful for a first test apply before the domain is set up."
   type        = string
+  default     = ""
 }
 
 variable "zone_name" {

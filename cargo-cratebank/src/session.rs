@@ -6,7 +6,7 @@
 //! frontend/codegen section events to the same stream. We read what cargo
 //! already wrote.
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
@@ -73,22 +73,30 @@ pub fn scrub_header(ev: &mut Map<String, Value>) {
 pub fn declared_public(dir: &std::path::Path) -> Option<String> {
     let mut cur = Some(dir.to_path_buf());
     while let Some(d) = cur {
-        if let Ok(txt) = std::fs::read_to_string(d.join("Cargo.toml")) {
-            if let Ok(v) = txt.parse::<toml::Value>() {
-                for t in ["package", "workspace"] {
-                    let cb = v.get(t).and_then(|x| x.get("metadata")).and_then(|x| x.get("cratebank"));
-                    if cb.and_then(|x| x.get("public")).and_then(|x| x.as_bool()) == Some(true) {
-                        // link it properly: prefer the declared repository
-                        let repo = cb.and_then(|x| x.get("repository")).and_then(|x| x.as_str())
-                            .or_else(|| v.get("package").and_then(|p| p.get("repository"))
-                                         .and_then(|x| x.as_str()))
-                            .unwrap_or("").to_string();
-                        return Some(repo);
-                    }
-                }
-            }
+        if let Some(repo) = public_in_manifest(&d.join("Cargo.toml")) {
+            return Some(repo);
         }
         cur = d.parent().map(|x| x.to_path_buf());
+    }
+    None
+}
+
+/// `public = true` in one manifest, and the repository to link it by.
+fn public_in_manifest(path: &Path) -> Option<String> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    let v: toml::Value = txt.parse().ok()?;
+    for table in ["package", "workspace"] {
+        let cb = v.get(table).and_then(|x| x.get("metadata")).and_then(|x| x.get("cratebank"));
+        if cb.and_then(|x| x.get("public")).and_then(|x| x.as_bool()) != Some(true) {
+            continue;
+        }
+        // link it properly: prefer the declared repository
+        let repo = cb
+            .and_then(|x| x.get("repository"))
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("package").and_then(|p| p.get("repository")).and_then(|x| x.as_str()))
+            .unwrap_or("");
+        return Some(repo.to_string());
     }
     None
 }

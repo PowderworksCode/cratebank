@@ -1,6 +1,6 @@
 output "ingest_endpoint" {
   description = "What the client should be pointed at"
-  value       = "https://ingest.${var.zone_name}"
+  value       = var.zone_id == "" ? "https://${cloudflare_pipeline_stream.sessions.endpoint}" : "https://ingest.${var.zone_name}"
 }
 
 output "stream_endpoint" {

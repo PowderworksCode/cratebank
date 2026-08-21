@@ -7,6 +7,37 @@ use serde_json::Value;
 use crate::cli::Common;
 
 /// Minimal echo collector so the whole path is testable with no infrastructure.
+/// Read one request: headers, then `content-length` bytes of body.
+fn read_request(s: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = match s.read(&mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&tmp[..n]);
+        let Some(head_end) = find_header_end(&buf) else { continue };
+        if buf.len() - head_end >= content_length(&buf[..head_end]) {
+            break;
+        }
+    }
+    buf
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    String::from_utf8_lossy(buf).find("\r\n\r\n").map(|p| p + 4)
+}
+
+fn content_length(head: &[u8]) -> usize {
+    String::from_utf8_lossy(head)
+        .to_lowercase()
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 pub fn run(_o: &Common, port: u16) -> i32 {
     let l = match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -15,31 +46,9 @@ pub fn run(_o: &Common, port: u16) -> i32 {
     eprintln!("cratebank: echo collector on http://127.0.0.1:{port}/ingest");
     for stream in l.incoming() {
         let Ok(mut s) = stream else { continue };
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 8192];
-        let mut len = 0usize;
-        loop {
-            match s.read(&mut tmp) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if len == 0 {
-                        if let Some(p) = String::from_utf8_lossy(&buf).find("\r\n\r\n") {
-                            let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
-                            len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
-                                      .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
-                            let body = buf.len() - (p + 4);
-                            if body >= len { break }
-                        }
-                    } else if let Some(p) = String::from_utf8_lossy(&buf).find("\r\n\r\n") {
-                        if buf.len() - (p + 4) >= len { break }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+        let buf = read_request(&mut s);
         let txt = String::from_utf8_lossy(&buf).to_string();
-        let head_len = txt.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
+        let head_len = find_header_end(&buf).unwrap_or(0);
         let compressed = txt[..head_len.min(txt.len())].to_lowercase().contains("content-encoding: br");
         let body = if compressed {
             crate::ship::decompress(&buf[head_len..]).unwrap_or_default()

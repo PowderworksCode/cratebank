@@ -25,11 +25,12 @@ pub(crate) fn write_cargo_config(root: &std::path::Path, o: &Common, changed: &m
     if have.contains("build-analysis") { return; }
     if o.dry_run {
         println!("--- {} ---\n{want}", cfg.display());
-    } else {
-        let _ = std::fs::create_dir_all(cfg.parent().unwrap());
-        let _ = std::fs::write(&cfg, format!("{}{}{want}", have.trim_end(),
-                                             if have.trim().is_empty() { "" } else { "\n\n" }));
+        changed.push(".cargo/config.toml (workspace root): build-analysis + section-timings");
+        return;
     }
+    let separator = if have.trim().is_empty() { "" } else { "\n\n" };
+    let _ = std::fs::create_dir_all(cfg.parent().unwrap());
+    let _ = std::fs::write(&cfg, format!("{}{separator}{want}", have.trim_end()));
     changed.push(".cargo/config.toml (workspace root): build-analysis + section-timings");
 }
 

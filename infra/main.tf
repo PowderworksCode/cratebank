@@ -80,6 +80,9 @@ resource "cloudflare_pipeline_sink" "raw" {
     type            = "parquet"
     compression     = "zstd"
     row_group_bytes = 134217728 # 128 MiB
+    # The stream carries one arbitrary-JSON column; tell the sink not to try to
+    # impose a shape on it. Confirm with `plan` -- see README.
+    unstructured = true
   }
 
   # Empty schema: the sink inherits the stream's single json column.
@@ -92,12 +95,16 @@ resource "cloudflare_pipeline_sink" "raw" {
 
     # Hive-style partitioning is what every query engine expects, so
     # SELECT ... FROM 'https://.../raw/**/*.parquet' prunes by date for free.
-    time_pattern = "year=%Y/month=%m/day=%d"
+    partitioning = {
+      time_pattern = "year=%Y/month=%m/day=%d"
+    }
 
-    # Roll on whichever comes first. Five minutes keeps the tail latency
-    # low without producing a swarm of tiny objects at low volume.
-    interval_seconds = 300
-    file_size_bytes  = 104857600 # 100 MiB
+    # Roll on whichever comes first. Five minutes keeps tail latency low
+    # without producing a swarm of tiny objects at low volume.
+    rolling_policy = {
+      interval_seconds = 300
+      file_size_bytes  = 104857600 # 100 MiB
+    }
 
     credentials = {
       access_key_id     = var.r2_access_key_id
@@ -124,6 +131,8 @@ resource "cloudflare_pipeline" "cratebank" {
 # creation so one day we will need a different one, and a released client that
 # hardcoded a Cloudflare hostname could never be redirected.
 resource "cloudflare_dns_record" "ingest" {
+  count = var.zone_id == "" ? 0 : 1
+
   zone_id = var.zone_id
   name    = "ingest"
   type    = "CNAME"
