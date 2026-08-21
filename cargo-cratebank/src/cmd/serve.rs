@@ -39,9 +39,19 @@ pub fn run(_o: &Common, port: u16) -> i32 {
             }
         }
         let txt = String::from_utf8_lossy(&buf).to_string();
-        let body = txt.splitn(2, "\r\n\r\n").nth(1).unwrap_or("").to_string();
+        let head_len = txt.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
+        let gzipped = txt[..head_len.min(txt.len())].to_lowercase().contains("content-encoding: gzip");
+        let body = if gzipped {
+            use std::io::Read as _;
+            let mut out = String::new();
+            flate2::read::GzDecoder::new(&buf[head_len..]).read_to_string(&mut out).ok();
+            out
+        } else {
+            txt.splitn(2, "\r\n\r\n").nth(1).unwrap_or("").to_string()
+        };
         match serde_json::from_str::<Value>(&body) {
-            Ok(v) => eprintln!("[ingest] run {} · {} events · {} units ({} withheld) · {} sections · {} · rustc {}",
+            Ok(v) => eprintln!("[ingest]{} run {} · {} events · {} units ({} withheld) · {} sections · {} · rustc {}",
+                if gzipped { " gzip" } else { "" },
                 v["run_id"].as_str().unwrap_or("?"),
                 v["counts"]["events"], v["counts"]["units"], v["counts"]["units_withheld"],
                 v["counts"]["sections"], v["env"]["host"].as_str().unwrap_or("?"),

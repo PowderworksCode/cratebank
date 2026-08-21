@@ -34,11 +34,16 @@ pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;
         }
-        match post(&o.endpoint, &body) {
-            Ok(resp) => {
+        match crate::ship::post_sized(&o.endpoint, &body) {
+            Ok((resp, wire)) => {
                 sent += 1;
                 let c = &body["counts"];
-                println!("sent {run_id}: {} events, {} units ({} withheld), {} sections -> {} [{}]",
+                let (raw, _) = crate::ship::sizes(&body);
+                let how = if wire < raw { format!("{:.0} KB gzipped from {:.0} KB",
+                                                  wire as f64 / 1024.0, raw as f64 / 1024.0) }
+                          else { format!("{:.0} KB uncompressed", wire as f64 / 1024.0) };
+                println!("sent {run_id}: {} events, {} units ({} withheld), {} sections, \
+                          {how} -> {} [{}]",
                          c["events"], c["units"], c["units_withheld"], c["sections"],
                          o.endpoint, resp.trim());
             }

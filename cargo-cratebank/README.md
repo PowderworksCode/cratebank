@@ -317,6 +317,24 @@ Reporting `0.0` for a load average that does not exist would read as "idle
 machine" and bias every contention model built on the data, so those fields are
 null instead.
 
+## Compression
+
+Submissions are gzipped — about **9x** on real sessions (25 KB → 3 KB), for the
+cost of a header. `flate2`'s pure-Rust backend does it, so there is no C
+toolchain to find on any platform.
+
+Inbound `Content-Encoding` is undocumented for the ingest endpoint, so a
+rejection is not treated as an error: the same body is sent again uncompressed,
+and the output says which happened.
+
+```
+sent …: 91 events, 43 units (11 withheld), 3 KB gzipped from 25 KB -> …
+sent …: 91 events, 43 units (11 withheld), 25 KB uncompressed -> …
+```
+
+A lost contribution is worse than a large one. `cargo cratebank serve`
+decompresses too, so the reference collector behaves like a real one.
+
 ## Payload
 
 One session, one POST. Events pass through **verbatim** under a small header:

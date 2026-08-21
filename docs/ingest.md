@@ -206,16 +206,23 @@ Measured on a real session (91 events, 43 units):
 
 Three conclusions, in order of how much they matter.
 
-**Compress the request body.** An 8.9x reduction for a header, no schema change,
-and nothing to maintain. A 1,000-unit build goes from ~2.3 MB to roughly 260 KB.
-Brotli is better still, but gzip is universally accepted and the gap is small;
-try brotli, fall back to gzip, fall back to plain.
+**Compress the request body — done.** The client gzips every submission and
+falls back to plain on rejection, reporting which happened. Measured end to end
+at 8.8x against the reference collector. `flate2`'s default backend is pure Rust
+(miniz_oxide), so nothing needs a C toolchain — which matters on Windows, where
+the one dependency that does need one (`ring`, via TLS) is already the hard part
+of cross-building.
 
-*Unverified:* Cloudflare documents compression for sink **output**, not for
-inbound request bodies. Their edge does transparently decompress request bodies
-in other products, so this likely works, but it has to be confirmed against the
-real endpoint — and the client must fall back rather than assume, since a
-rejected upload is a lost contribution.
+Brotli would give another ~16% (`brotli`, also pure Rust) but gzip is
+universally accepted and the gap is small; it is worth adding only once the
+endpoint is confirmed to accept `br`.
+
+*Still unverified:* inbound `Content-Encoding` is **undocumented** for Pipelines.
+The docs and the launch blog mention compression only for sink *output*; the one
+reference to GZIP on ingest belongs to the pre-Arroyo API. Cloudflare's edge
+transparently decompresses request bodies in other products, so it likely works
+— but the fallback exists precisely because "likely" is not a basis for
+discarding a contribution.
 
 **Do not slim the payload.** Dropping the `run_id` repeated on every event and
 delta-encoding timestamps removes 27% of the raw bytes — those two fields are a
@@ -233,11 +240,14 @@ parquet belongs is the sink, where it already is.
 
 ### One open question
 
-Whether the 5 MB request limit counts compressed or decompressed bytes. If
-compressed, batching is unnecessary — the largest builds land around 260 KB —
-and the client needs no changes at all for v1. If decompressed, batching stays
-as designed. Worth establishing before writing the batching code, since the
-answer may delete it.
+Whether the 5 MB request limit counts compressed or decompressed bytes. The
+limits page states "Maximum payload size per ingestion request: 5 MB" and says
+nothing about compression state — the word does not appear on the page.
+
+It decides real work: if compressed, the largest builds land near 260 KB and the
+client needs **no batching at all** for v1; if decompressed, batching stays as
+designed. One request against the live endpoint settles it, and it should be the
+first thing tried once an account exists.
 
 ## Storage layout
 
