@@ -286,6 +286,27 @@ responses and both are free. Sizes are reported **only for units being sent**:
 a file name in a target directory contains a crate name, so measuring a
 withheld unit would leak the identity the filter just removed.
 
+## Platforms
+
+Built and checked for unix and Windows. There is no portable way to ask for a
+child process's CPU time, so that is the one platform-specific piece —
+`wait4` on unix, `GetProcessTimes` on Windows — and hardware detection goes
+through `sysinfo` rather than parsing `/proc`.
+
+What differs, and is reported as absent rather than faked:
+
+| | unix | Windows |
+| --- | --- | --- |
+| per-unit CPU | user + sys | user + kernel |
+| peak RSS | yes | not from `GetProcessTimes` — `null` |
+| load average | yes | none exists — `null`, never `0.0` |
+| pressure stalls (PSI) | Linux only | `null` |
+| virtualization hint | Linux only | `null` |
+
+Reporting `0.0` for a load average that does not exist would read as "idle
+machine" and bias every contention model built on the data, so those fields are
+null instead.
+
 ## Payload
 
 One session, one POST. Events pass through **verbatim** under a small header:

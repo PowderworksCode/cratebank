@@ -23,8 +23,15 @@ use crate::cli::cargo_home;
 
 pub fn sidecar_dir() -> PathBuf { cargo_home().join("cratebank").join("rusage") }
 
-/// `wait4` gives us the child's CPU *and* everything it waited for.
-fn wait_rusage(pid: i32) -> (i32, f64, f64, i64) {
+/// Reap a child and report `(exit code, user CPU, system CPU, peak RSS kB)`.
+///
+/// There is no portable way to ask for a child's CPU time, so this is the one
+/// place the client is platform-specific: `wait4` on unix, `GetProcessTimes`
+/// on Windows. Both give exact accounting for the process that just exited —
+/// far better than sampling, which misses short-lived compilations entirely.
+#[cfg(unix)]
+fn wait_rusage(child: &mut std::process::Child) -> (i32, f64, f64, i64) {
+    let pid = child.id() as i32;
     let mut status: libc::c_int = 0;
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     let r = unsafe { libc::wait4(pid, &mut status, 0, &mut ru) };
@@ -33,6 +40,27 @@ fn wait_rusage(pid: i32) -> (i32, f64, f64, i64) {
         else if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) }
         else { 128 + libc::WTERMSIG(status) };
     (code, tv(ru.ru_utime), tv(ru.ru_stime), ru.ru_maxrss)
+}
+
+#[cfg(windows)]
+fn wait_rusage(child: &mut std::process::Child) -> (i32, f64, f64, i64) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    // Read the times before waiting: after wait() the handle is closed.
+    let handle = child.as_raw_handle() as HANDLE;
+    let status = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    let mut zero = [FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 }; 4];
+    let ok = unsafe {
+        GetProcessTimes(handle, &mut zero[0], &mut zero[1], &mut zero[2], &mut zero[3])
+    };
+    // FILETIME counts 100-nanosecond intervals.
+    let secs = |f: FILETIME| {
+        (((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64) as f64 / 1e7
+    };
+    if ok == 0 { return (status, 0.0, 0.0, 0); }
+    (status, secs(zero[3]), secs(zero[2]), 0)   // user, kernel; no RSS from this call
 }
 
 /// Find a `-C key=value` among the codegen flags (they repeat, so the first
@@ -67,13 +95,13 @@ pub fn shim(args: &[String]) -> i32 {
     };
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    let child = match Command::new(&program).args(&rest).spawn() {
+    let mut child = match Command::new(&program).args(&rest).spawn() {
         Ok(c) => c,
         Err(_) => return 1,
     };
-    let pid = child.id() as i32;
-    let (code, user, sys, maxrss) = wait_rusage(pid);
-    std::mem::forget(child);   // already reaped by wait4
+    let (code, user, sys, maxrss) = wait_rusage(&mut child);
+    #[cfg(unix)]
+    std::mem::forget(child);   // wait4 already reaped it
 
     // record, best effort: a failure to write must not disturb the build
     if let Some(crate_name) = arg_value(args, "--crate-name") {

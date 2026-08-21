@@ -109,33 +109,28 @@ fn random_id() -> String {
     format!("{a:016x}{:016x}", h.finish())
 }
 
-fn first_value(path: &str, key: &str) -> Option<String> {
-    let txt = std::fs::read_to_string(path).ok()?;
-    for line in txt.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key { return Some(v.trim().to_string()); }
-        }
-    }
-    None
+/// Hardware and OS, via `sysinfo` — one cross-platform source instead of
+/// `/proc` parsing that silently returns nothing everywhere else.
+fn hardware() -> (Option<String>, Option<usize>, Option<u64>, Option<String>, Option<String>) {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_cpu_all();
+    sys.refresh_memory();
+    let cpu = sys.cpus().first().map(|c| c.brand().trim().to_string()).filter(|s| !s.is_empty());
+    let cores = std::thread::available_parallelism().map(|p| p.get()).ok();
+    // nearest GB: a size, not a fingerprint
+    let mem = Some((sys.total_memory() + 512 * 1024 * 1024) / (1024 * 1024 * 1024));
+    let kernel = System::kernel_version();
+    let os = System::long_os_version();
+    (cpu, cores, mem, kernel, os)
 }
 
-fn mem_gb() -> Option<u64> {
-    let kb: u64 = first_value("/proc/meminfo", "MemTotal")?
-        .split_whitespace().next()?.parse().ok()?;
-    Some((kb + 512 * 1024) / (1024 * 1024))   // nearest GB; not a fingerprint
-}
-
-/// Cheap virtualization hint — a VM's timings are not a laptop's.
+/// Cheap virtualization hint — a VM's timings are not a laptop's. Linux only;
+/// elsewhere the CI flag and the CPU brand carry most of the same signal.
 fn virt() -> Option<String> {
     let out = std::process::Command::new("systemd-detect-virt").output().ok()?;
     let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if v.is_empty() || v == "none" { None } else { Some(v) }
-}
-
-fn kernel() -> Option<String> {
-    let out = std::process::Command::new("uname").arg("-r").output().ok()?;
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if v.is_empty() { None } else { Some(v) }
 }
 
 pub fn cargo_version() -> Option<String> {
@@ -145,13 +140,15 @@ pub fn cargo_version() -> Option<String> {
 
 /// Specs a hardware review would print. No hostname, user or network identity.
 pub fn snapshot(project_dir: Option<&std::path::Path>) -> Value {
+    let (cpu_model, cpu_cores, mem_gb, kernel, os_version) = hardware();
     json!({
         "machine_id": machine_id(project_dir),
-        "cpu_model": first_value("/proc/cpuinfo", "model name"),
-        "cpu_cores": std::thread::available_parallelism().map(|p| p.get()).ok(),
-        "mem_gb": mem_gb(),
-        "kernel": kernel(),
+        "cpu_model": cpu_model,
+        "cpu_cores": cpu_cores,
+        "mem_gb": mem_gb,
+        "kernel": kernel,
         "os": std::env::consts::OS,
+        "os_version": os_version,
         "arch": std::env::consts::ARCH,
         "virt": virt(),
         "cargo_version": cargo_version(),

@@ -14,13 +14,15 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+/// One-minute load average. Unix-only in substance: `sysinfo` reports zeros on
+/// Windows, so a Windows contribution simply carries no load figure rather
+/// than a fabricated one.
 fn loadavg() -> f64 {
-    std::fs::read_to_string("/proc/loadavg").ok()
-        .and_then(|s| s.split_whitespace().next().and_then(|t| t.parse().ok()))
-        .unwrap_or(0.0)
+    sysinfo::System::load_average().one
 }
 
 /// Total stall time from the pressure-stall interface, in microseconds.
+/// Linux only; the read simply fails elsewhere and the field is null.
 /// Deltas across a build say how much of it was spent waiting for a resource
 /// rather than using one.
 fn psi_total(kind: &str) -> Option<u64> {
@@ -70,9 +72,12 @@ impl Sampler {
             };
             stall.insert(k.to_string(), d);
         }
+        // Windows and macOS report no load average; send null rather than 0.0,
+        // which would read as "idle machine" and bias every contention model.
+        let usable = max > 0.0;
         json!({
-            "loadavg_mean": if n > 0 { json!(sum / n as f64) } else { Value::Null },
-            "loadavg_max": if n > 0 { json!(max) } else { Value::Null },
+            "loadavg_mean": if n > 0 && usable { json!(sum / n as f64) } else { Value::Null },
+            "loadavg_max": if n > 0 && usable { json!(max) } else { Value::Null },
             "samples": n,
             "stall_seconds": stall,
         })
