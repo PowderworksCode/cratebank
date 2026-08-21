@@ -1,0 +1,62 @@
+name: samply-probe
+
+# Can a hosted runner sample a build? macOS needs no privileges; Linux needs
+# perf_event_paranoid lowered, which hosted runners permit via passwordless
+# sudo. This job exists to answer that empirically rather than from docs --
+# delete it once the answer is settled.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [phase-attribution]
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: perf_event_paranoid before
+        if: runner.os == 'Linux'
+        run: cat /proc/sys/kernel/perf_event_paranoid || echo "unreadable"
+
+      - name: allow perf events
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1 || echo "sysctl FAILED"
+          sudo sysctl kernel.perf_event_mlock_kb=2048 || true
+
+      - name: install samply
+        run: cargo install samply --locked
+
+      - name: sample a real build
+        working-directory: cargo-cratebank
+        run: |
+          set -x
+          samply record --save-only --unstable-presymbolicate --include-args \
+            -o /tmp/p.json --rate 999 -- cargo build
+          ls -la /tmp/p.json /tmp/p.syms.json
+
+      - name: did it actually collect anything?
+        run: |
+          python3 - <<'PY'
+          import json, re, collections
+          d = json.load(open('/tmp/p.json'))
+          n = sum(len(t['samples'].get('time') or []) for t in d['threads'])
+          rustc = [t for t in d['threads'] if '--crate-name' in (t.get('processName') or '')]
+          print(f"samples: {n}")
+          print(f"threads whose processName carries a rustc command line: {len(rustc)}")
+          sy = json.load(open('/tmp/p.syms.json'))
+          crates = {m.group(1) for s in sy['string_table']
+                    for m in [re.match(r'^(rustc_[a-z_]+)::', str(s))] if m}
+          print(f"distinct rustc_* crates symbolicated: {len(crates)}")
+          assert n > 0, "no samples collected"
+          assert rustc, "--include-args did not expose rustc command lines"
+          assert crates, "no rustc symbols resolved"
+          print("OK: sampling is viable on this runner")
+          PY
