@@ -252,16 +252,17 @@ pub fn payload(s: &mut Session, build_env: Value, load: Value) -> Value {
     let artifacts = s.target_dir.as_ref()
         .map(|d| crate::artifacts::report(d, &s.public_crates))
         .unwrap_or(Value::Null);
+    let machine_json = crate::machine::snapshot(Some(&s.dir));
     let events = std::mem::take(&mut s.events);
     let withheld = s.withheld;
     payload_inner(&run_id, events, &header, withheld, build_env, load, artifacts,
-                  cpu_matched, cpu_total)
+                  cpu_matched, cpu_total, machine_json)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn payload_inner(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
            withheld: usize, build_env: Value, load: Value, artifacts: Value,
-           cpu_matched: usize, cpu_total: usize) -> Value {
+           cpu_matched: usize, cpu_total: usize, machine_json: Value) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
     let sections = events.iter()
         .filter(|e| e["reason"] == "unit-section-finished").count();
@@ -280,7 +281,7 @@ fn payload_inner(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
             "ci": std::env::var("CI").is_ok(),
         },
         "repository": repository,
-        "machine": crate::machine::snapshot(),
+        "machine": machine_json,
         "load": load,
         "artifacts": artifacts,
         // per-unit CPU only exists if the rustc shim was in use; say how much

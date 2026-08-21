@@ -53,9 +53,12 @@ timings** for every compilation unit in the graph, each with its resolved
 features, platform and mode, including rustc's frontend/codegen section
 boundaries.
 
-Plus a **machine profile** — CPU model, cores, memory, kernel, virtualization,
-cargo version; no machine id, no hostname, no user — and **build
-configuration** that cargo's log omits — `RUSTFLAGS`, the linker,
+Plus a **machine id and profile** — the id is random on first use and you are
+told when it is created; set `CRATEBANK_MACHINE_ID` or
+`[package.metadata.cratebank] machine_id = "acme-ci"` to attribute your runs to
+your organisation instead, or `none` to send no id at all. The profile is CPU
+model, cores, memory, kernel, virtualization and cargo version; hostname and
+username are never read. And **build configuration** that cargo's log omits — `RUSTFLAGS`, the linker,
 any compiler wrapper — read from a whitelist of environment variables and
 cargo's resolved config, with every value classified first: flag names and
 non-path values are kept, program paths are reduced to a basename

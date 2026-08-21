@@ -68,7 +68,8 @@ so the payload never carries an orphaned index.
 | private registries, local paths | never |
 | paths (`cwd`, `workspace_root`, `target_dir`, `manifest_path`) | never |
 | environment variables | never read (except the build-config whitelist below) |
-| machine or user identity | never — no id, no hostname, no username |
+| machine id | **yes** — random by default, configurable, or `none` |
+| hostname, username, network identity | never |
 | command-line values | replaced with `<arg>`; flag names kept (see below) |
 | source code | never |
 
@@ -98,23 +99,43 @@ recorded **as resolved** rather than as requested:
 | `build` / `check` / `test` | `mode`, per unit |
 | `-Z…` | kept — flag names survive scrubbing |
 
-### Machine profile, and no machine id
+### Machine id — stated plainly
 
-Separating *this crate is expensive* from *this machine is slow* requires
-knowing what a build ran on. It does not require knowing **which** machine, and
-there is deliberately no machine id.
+**Every payload carries a machine id.** It is the one field here that enables
+linkage: with it, sessions from one machine join together, which is what makes
+within-machine comparisons possible — *on this same box, did serde 1.0.200
+compile slower than 1.0.199?* — and equally what makes a build timeline
+reconstructable. That is the trade, said out loud. If you do not want it, do not
+send the data.
 
-On CI an id would be useless at best — runners are ephemeral, so every job is a
-new machine — and wrong at worst: a cached `$CARGO_HOME` carries the id across
-genuinely different physical runners and groups unrelated hardware under one
-label. On a laptop, a persistent id is exactly the sort of durable per-user
-handle a build tool has no business minting.
+The id is yours to set, and a chosen value is often the better one:
 
-So what is sent is a *profile*: CPU model, cores, memory to the nearest GB,
-kernel, OS/arch, virtualization, cargo version, and whether `CI` is set. The
-grouping the statistics want is "a 4-core Linux CI runner", not one ephemeral
-VM, and a profile says that directly while being shared by millions of
-machines. Hostname, user and network identity are never read.
+| source | precedence | typical use |
+| --- | --- | --- |
+| `CRATEBANK_MACHINE_ID` | first | CI, where `$CARGO_HOME` is ephemeral |
+| `[package.metadata.cratebank] machine_id` | second | one id for a project or an org |
+| `$CARGO_HOME/cratebank/machine-id` | third | a plain file — edit it freely |
+| random, generated once | fallback | a personal machine |
+
+```toml
+[workspace.metadata.cratebank]
+share = true
+machine_id = "acme-ci"        # attribution: these runs are ours
+```
+
+`acme-ci` credits a company's builds to that company, which is attribution
+rather than tracking — and on ephemeral CI a random id would be a fresh
+meaningless value every job anyway. Set it to `none` (or empty) and no id is
+sent at all.
+
+On first use the client generates a random id, writes it to
+`$CARGO_HOME/cratebank/machine-id`, and **tells you it did**, with the path and
+how to change it. `cargo cratebank status` shows the current id and where it
+came from.
+
+Alongside it, a *profile*: CPU model, cores, memory to the nearest GB, kernel,
+OS/arch, virtualization, cargo version, and whether `CI` is set — each shared by
+millions of machines. Hostname, user and network identity are never read.
 
 ### Build configuration from the environment
 
@@ -246,6 +267,7 @@ server-side.
   },
   "complete": true,
   "machine": {
+    "machine_id": "acme-ci",
     "cpu_model": "AMD EPYC 9554P 64-Core Processor",
     "cpu_cores": 16, "mem_gb": 63, "kernel": "6.12.93",
     "os": "linux", "arch": "x86_64", "virt": "kvm", "ci": false,

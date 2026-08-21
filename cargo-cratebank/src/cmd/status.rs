@@ -16,6 +16,16 @@ pub fn run(o: &Common) -> i32 {
     println!("endpoint      {}", o.endpoint);
     println!("privacy       public units only (non-public units are never sent)");
     let here = std::env::current_dir().unwrap_or_default();
+    let (id, src) = if let Ok(v) = std::env::var("CRATEBANK_MACHINE_ID") {
+        (v, "CRATEBANK_MACHINE_ID")
+    } else {
+        match crate::machine::machine_id(Some(&here)) {
+            Some(v) => (v, "Cargo.toml or $CARGO_HOME/cratebank/machine-id"),
+            None => ("(none — no id is sent)".into(), "configured off"),
+        }
+    };
+    println!("machine id    {id}\n              from {src}");
+    let here = std::env::current_dir().unwrap_or_default();
     println!("auto-send     {}", if opted_in(&here) { "ON for this project (share = true)" }
                                  else { "off here — run: cargo cratebank enable" });
     let sent = std::fs::read_to_string(state_file()).map(|s| s.lines().count()).unwrap_or(0);
