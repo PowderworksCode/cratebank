@@ -5,12 +5,13 @@ use crate::cli::{Common, SendArgs};
 use crate::session::{log_dir, payload, read_session, sessions};
 
 pub fn run(o: &Common, a: &SendArgs) -> i32 {
-    // shipped after the fact: no honest load figure is available
-    run_with_load(o, a, Value::Null)
+    // shipped after the fact: neither an honest load figure nor phases are
+    // available, because the build already happened unsampled
+    run_with_load(o, a, Value::Null, Value::Null)
 }
 
 /// `build` measures load across the build it just ran, so it can supply one.
-pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
+pub fn run_with_load(o: &Common, a: &SendArgs, load: Value, phases: Value) -> i32 {
     let mut list = sessions();
     if let Some(id) = &a.session {
         list.retain(|p| {
@@ -26,7 +27,6 @@ pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
         eprintln!("  enable them:  cargo cratebank status");
         return 1;
     }
-    crate::rusage::prune(); // sidecar rusage files older than a day
     let mut sent = 0;
     let mut skipped = 0;
     for p in &list {
@@ -47,7 +47,7 @@ pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
             continue;
         }
         let env = crate::buildenv::snapshot(&s.dir);
-        let body = payload(&mut s, env, load.clone());
+        let body = payload(&mut s, env, load.clone(), phases.clone());
         if o.dry_run {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;

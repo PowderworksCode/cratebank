@@ -17,7 +17,7 @@ project view, `era` = one archival round.
 | resolved feature set | unit graph |
 | dependency edges as class ids (the cone) | unit graph |
 | resolved profile: opt-level, debuginfo, codegen-units, panic, overflow-checks, lto, incremental=false | unit graph / cargo |
-| full rustc argv, verbatim, plus filtered env | the rustc shim (below) |
+| full rustc argv, verbatim, plus filtered env | the profile's processName (`samply --include-args`) |
 | target triple, edition, toolchain (rustc -vV: commit hash, LLVM version) | rustc |
 | source hash: crates.io checksum, or workspace commit + dirty patch | lockfile / git |
 | inducing projects' Cargo.lock hashes | lockfile |
@@ -27,7 +27,7 @@ project view, `era` = one archival round.
 
 | field | source | class |
 | --- | --- | --- |
-| CPU user+sys per rustc invocation | **the rustc shim** — a whyslow wrapper that records argv + wait4 rusage per invocation; the instrument that makes per-class CPU first-class (today we have per-unit *wall* sections + project-tree CPU only) | MUST |
+| CPU per rustc invocation, split by compiler phase | **the sampler** (below) — samples carry a pid and every unit is its own process, so per-class CPU becomes first-class rather than derived from wall sections | MUST |
 | wall, start/end timestamps (schedule reconstruction), rmeta-emit time (pipelining point) | --timings + shim | MUST |
 | max RSS, minor/major faults, voluntary/involuntary context switches, fs in/out | shim rusage | MUST |
 | exit code, warning count, full stderr on failure (exclusions are data) | shim | MUST |
@@ -114,9 +114,19 @@ committing to a shape now would only constrain a decision better made later.
 
 ## The one new instrument this demands
 
-Everything above is existing flags plus one build: **the whyslow rustc shim**
-(`RUSTC_WRAPPER=whyslow-shim`) recording per-invocation argv/rusage/timestamps
-— it upgrades per-class CPU from "derived from wall sections" to measured, it
-wraps the linker for F, and it is how B/C conservation is checked per class
-rather than per project. Ironic and satisfying: the study's TRAP 1 was a
-rustc-wrapper; its definitive instrument is one.
+Everything above is existing flags plus one instrument: **a sampling profiler
+around the whole build**. It upgrades per-class phase cost from "derived from
+wall sections" to measured, and it is how B/C conservation is checked per class
+rather than per project.
+
+A rustc wrapper was the intended instrument and was abandoned after measuring
+it. `RUSTC_WRAPPER` overrides a contributor's `build.rustc-wrapper` instead of
+stacking, so it silently evicts `sccache` and doubles the build — the study's
+TRAP 1, reappearing as the fix for itself. The sampler stays out of the compile
+path entirely: every compilation unit is its own process and every sample
+carries a pid, so attribution is exact without changing how anything compiles.
+
+What it cannot reach: `-Ztime-passes`' 57 named passes and `-Zself-profile`'s
+per-query detail are nightly-only. Sampling recovers the phase decomposition on
+stable to within about a point (validated against `-Ztime-passes` at
+`-Ccodegen-units=1`), but not the leaf-level query breakdown.

@@ -259,20 +259,30 @@ Cargo's log reports **wall clock** per unit, which on a `-j16` build is largely
 a statement about contention. Three additions make the data answer cost
 questions rather than scheduling ones.
 
-**Per-unit CPU** — opt in by pointing `RUSTC_WRAPPER` at this binary:
+**Per-unit compiler phases** — `cargo cratebank build` runs the build under
+[samply](https://github.com/mstange/samply) and reports where each crate's
+compile time went:
 
-```sh
-RUSTC_WRAPPER=$(command -v cargo-cratebank) cargo build
+```
+emit          serial 11476  parallel  226   borrowck=4165 type_check=3549 macro_expand=1240
+serde_derive  serial  4968  parallel 2238   borrowck=1390 codegen=1173   macro_expand=816
 ```
 
-It execs the real rustc, reaps it with `wait4`, and records user+sys CPU and
-peak RSS per invocation; `send` merges those into the session. It **chains** —
-set `CRATEBANK_INNER_WRAPPER` to keep `sccache` in the loop — and a failure
-inside the shim still runs the compiler and still returns its status. Every
-payload carries `cpu_coverage` (`{"matched": 34, "units": 34}`) so an analysis
-never mistakes a wall time for a CPU time. Build-script *executions* are
-excluded from the denominator: they run no compiler, so they can never have
-rustc CPU.
+Nothing wraps rustc. The sampler runs once around the whole build; every
+compilation unit is its own rustc process and every sample carries a pid, so
+attribution is exact however many run in parallel — and your `sccache` is
+untouched, because no `RUSTC_WRAPPER` is involved.
+
+`serial` and `parallel` are separated because rustc codegens on a thread per
+codegen unit: on a large build a third of all compile CPU is there, and mixing
+it into one number gives something comparable to neither wall clock nor CPU.
+
+This needs `cargo install samply`. If samply is missing or fails, the build is
+re-run without it and the session is still sent — with `phases: null`, never a
+zero, so an analysis cannot mistake "not measured" for "took no time".
+
+Validated against nightly `-Ztime-passes` on a real crate at
+`-Ccodegen-units=1`: every phase within about one point.
 
 **Machine load** — sampled *during* the build (`build` and `watch`, the two
 commands present for one): mean and max **CPU utilisation**, mean and max load
@@ -378,7 +388,10 @@ server-side.
     "env": {"RUSTFLAGS": ["-C target-cpu=native", "-C lto=thin", "-C linker=clang"]},
     "config": {"build.rustc-wrapper": "sccache", "build.incremental": "false"}
   },
-  "cpu_coverage": {"matched": 34, "units": 34},
+  "phases": {"sampler": "samply", "rate_hz": 4999, "units": [
+      {"crate": "syn", "crate_type": "lib",
+       "serial": {"borrowck": 1237, "type_check": 1038, "metadata_encode": 634},
+       "parallel": {"codegen": 1875}}]},
   "load": {"cpu_busy_mean": 99.5, "cpu_busy_max": 99.9,
            "loadavg_mean": 8.49, "loadavg_max": 8.49, "samples": 7,
            "stall_seconds": {"cpu": 0.31, "io": 0.02, "memory": 0.0}},

@@ -1,0 +1,368 @@
+//! Per-unit compiler phase measurement, by sampling the build.
+//!
+//! `samply record -- cargo build` profiles the whole build; every compilation
+//! unit is its own rustc process, and every sample carries a pid, so samples
+//! attribute to units exactly however many run concurrently. Attributing by
+//! time window instead would be hopeless on a `-j12` build.
+//!
+//! Nothing wraps rustc. `--include-args` puts the full rustc command line in
+//! the profile's `processName`, so a unit's identity is already in the data --
+//! no `RUSTC_WRAPPER`, no sidecar files, and a contributor's `sccache` keeps
+//! working untouched.
+//!
+//! Why this rather than the alternatives, all of which were measured:
+//!
+//! - `-Ztime-passes` gives 57 named passes but needs nightly.
+//! - `-Zself-profile` is finer still and produces 14 MB per *small* build.
+//! - `RUSTC_LOG` has no usable timings: release rustc compiles out DEBUG and
+//!   TRACE, so the phase spans do not exist, and it costs +72% to collect.
+//! - cargo's `--timings` and artifact mtimes give frontend/codegen for free but
+//!   cannot split the frontend, which is 80% of the time on some crates.
+//!
+//! Sampling is the only one that is stable, version-independent, and detailed.
+//! Validated against nightly `-Ztime-passes` on a real crate at
+//! `-Ccodegen-units=1`: every phase within ~1 point.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::{json, Value};
+
+/// Phase markers, matched against demangled symbol names.
+///
+/// rustc's crate structure *is* its phase structure, and stable rustc ships a
+/// full symbol table (233k symbols; nothing is stripped, because backtraces
+/// need it). So a symbol prefix recovers the phase for free.
+///
+/// Two names are mapped to rustc's own vocabulary rather than the crate that
+/// implements them, because that is what they mean:
+///   - `type_check` is `rustc_hir_analysis`, which *encloses* `rustc_hir_typeck`
+///   - `borrowck` includes the MIR pipeline it drives (drop elaboration, const
+///     checking) -- `-Ztime-passes` reports those as one span
+const MARKERS: &[(&str, &[&str])] = &[
+    ("macro_expand", &["rustc_expand::"]),
+    ("resolve", &["rustc_resolve::"]),
+    ("coherence", &["rustc_hir_analysis::coherence"]),
+    (
+        "type_check",
+        &["rustc_hir_analysis::", "rustc_hir_typeck::"],
+    ),
+    ("borrowck", &["rustc_borrowck::", "rustc_mir_transform::"]),
+    ("monomorphize", &["rustc_monomorphize::"]),
+    (
+        "metadata_encode",
+        &["rustc_metadata::rmeta::encoder", "encode_metadata"],
+    ),
+    ("codegen", &["rustc_codegen_llvm::", "rustc_codegen_ssa::"]),
+];
+
+/// What one compilation unit cost, split by phase.
+#[derive(Debug, Default)]
+pub struct UnitPhases {
+    pub crate_name: String,
+    pub crate_type: String,
+    /// Samples on the main thread: the serial part of compilation.
+    pub serial: BTreeMap<String, u64>,
+    /// Samples on per-codegen-unit threads. rustc codegens on a thread per
+    /// CGU, so this is real parallel work -- a third of all compile CPU on a
+    /// large build. Kept separate because mixing it with `serial` produces a
+    /// number comparable to neither wall clock nor CPU.
+    pub parallel: BTreeMap<String, u64>,
+}
+
+impl UnitPhases {
+    pub fn total(&self) -> u64 {
+        self.serial.values().sum::<u64>() + self.parallel.values().sum::<u64>()
+    }
+}
+
+pub fn samply_available() -> bool {
+    Command::new("samply")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run cargo under the sampler with the given argv (which includes the
+/// subcommand). Returns the two profile paths.
+///
+/// The rate is deliberately high. samply costs a flat ~1s per invocation
+/// regardless of rate -- process setup and profile serialisation -- and only
+/// ~116us per sample, so on any build worth measuring the fixed cost dominates
+/// and a low rate saves almost nothing while starving small units of samples.
+pub fn record(args: &[String], out: &Path, rate: u32) -> Result<(PathBuf, PathBuf), String> {
+    let prof = out.join("profile.json");
+    let syms = out.join("profile.syms.json");
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+
+    let mut cmd = Command::new("samply");
+    cmd.arg("record")
+        .arg("--save-only")
+        .arg("--unstable-presymbolicate") // writes the .syms.json sidecar
+        .arg("--include-args") // puts the rustc command line in processName
+        .arg("-o")
+        .arg(&prof)
+        .arg("--rate")
+        .arg(rate.to_string())
+        .arg("--")
+        .arg("cargo")
+        .args(args);
+
+    let st = cmd
+        .status()
+        .map_err(|e| format!("cannot run samply: {e}"))?;
+    if !st.success() {
+        return Err(format!("samply exited {}", st.code().unwrap_or(-1)));
+    }
+    if !prof.exists() {
+        return Err("samply produced no profile".into());
+    }
+    Ok((prof, syms))
+}
+
+/// `(crate_name, crate_type)` from a rustc command line, or None if this
+/// process is not a compilation.
+///
+/// cargo probes the compiler with `--print` invocations before building
+/// anything; those are not units and must not be counted.
+fn unit_of(process_name: &str) -> Option<(String, String)> {
+    if !process_name.starts_with("rustc") {
+        return None;
+    }
+    let argv = split_args(process_name);
+    let mut name = None;
+    let mut kind = None;
+    let mut it = argv.iter().peekable();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("--crate-name=") {
+            name = Some(v.to_string());
+        } else if a == "--crate-name" {
+            name = it.peek().map(|s| s.to_string());
+        } else if let Some(v) = a.strip_prefix("--crate-type=") {
+            kind.get_or_insert(v.to_string());
+        } else if a == "--crate-type" {
+            if let Some(v) = it.peek() {
+                kind.get_or_insert(v.to_string());
+            }
+        }
+    }
+    let name = name?;
+    if name == "___" || argv.iter().any(|a| a.starts_with("--print")) {
+        return None;
+    }
+    Some((name, kind.unwrap_or_else(|| "lib".into())))
+}
+
+/// Shell-ish split honouring the single quotes samply writes around arguments.
+fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in s.chars() {
+        match c {
+            '\'' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn phase_of(sym: &str) -> Option<&'static str> {
+    MARKERS
+        .iter()
+        .find(|(_, pats)| pats.iter().any(|p| sym.contains(p)))
+        .map(|(label, _)| *label)
+}
+
+/// Per-library symbol table, keyed by the id the profile uses.
+struct Symbols(std::collections::HashMap<String, (Vec<u64>, Vec<String>)>);
+
+impl Symbols {
+    fn load(path: &Path) -> Result<Self, String> {
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?,
+        )
+        .map_err(|e| e.to_string())?;
+        let strings: Vec<String> = v["string_table"]
+            .as_array()
+            .ok_or("no string_table")?
+            .iter()
+            .map(|s| s.as_str().unwrap_or_default().to_string())
+            .collect();
+        let mut map = std::collections::HashMap::new();
+        for lib in v["data"].as_array().into_iter().flatten() {
+            let mut rvas = Vec::new();
+            let mut names = Vec::new();
+            for e in lib["symbol_table"].as_array().into_iter().flatten() {
+                let (Some(rva), Some(i)) = (e["rva"].as_u64(), e["symbol"].as_u64()) else {
+                    continue;
+                };
+                rvas.push(rva);
+                names.push(strings.get(i as usize).cloned().unwrap_or_default());
+            }
+            // The same library is spelled three ways: `code_id` matches the
+            // profile's `codeId` exactly, `debug_id` is dashed-lowercase, and
+            // the profile's `breakpadId` is uppercase-undashed with a trailing
+            // age digit. Keying on the wrong one resolves nothing at all, with
+            // no error -- it just looks like sampling does not work.
+            if let Some(id) = lib["code_id"].as_str() {
+                map.insert(id.to_string(), (rvas.clone(), names.clone()));
+            }
+            if let Some(id) = lib["debug_id"].as_str() {
+                map.insert(id.replace('-', "").to_uppercase(), (rvas, names));
+            }
+        }
+        Ok(Symbols(map))
+    }
+
+    fn resolve(&self, id: &str, addr: u64) -> Option<&str> {
+        let (rvas, names) = self.0.get(id)?;
+        let i = rvas.partition_point(|r| *r <= addr).checked_sub(1)?;
+        names.get(i).map(String::as_str)
+    }
+}
+
+/// Attribute every sample to a unit and a phase.
+pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
+    let symbols = Symbols::load(syms)?;
+    let p: Value = serde_json::from_str(
+        &std::fs::read_to_string(prof).map_err(|e| format!("{}: {e}", prof.display()))?,
+    )
+    .map_err(|e| e.to_string())?;
+    let libs = p["libs"].as_array().cloned().unwrap_or_default();
+
+    let mut units: BTreeMap<(String, String), UnitPhases> = BTreeMap::new();
+    for t in p["threads"].as_array().into_iter().flatten() {
+        let Some(unit) = t["processName"].as_str().and_then(unit_of) else {
+            continue;
+        };
+        // rustc names its codegen threads `opt cgu.NN`.
+        let is_cgu = t["name"]
+            .as_str()
+            .map(|n| n.starts_with("opt cgu") || n.starts_with("codegen cgu"))
+            .unwrap_or(false);
+
+        let ft = &t["frameTable"];
+        let fn_ = &t["funcTable"];
+        let rt = &t["resourceTable"];
+        let st = &t["stackTable"];
+        let (addrs, funcs) = (&ft["address"], &ft["func"]);
+        let (frames, prefixes) = (&st["frame"], &st["prefix"]);
+
+        let e = units.entry(unit.clone()).or_insert_with(|| UnitPhases {
+            crate_name: unit.0.clone(),
+            crate_type: unit.1.clone(),
+            ..Default::default()
+        });
+
+        for s in t["samples"]["stack"].as_array().into_iter().flatten() {
+            let Some(mut node) = s.as_u64() else { continue };
+            // Walk leaf -> root collecting names, then take the OUTERMOST
+            // phase marker: that is the enclosing phase, which is what
+            // `-Ztime-passes` reports. The innermost marker answers a
+            // different question (which subsystem the CPU was in) and is a
+            // deliberate choice left to the reader, not baked in here.
+            let mut chain: Vec<&str> = Vec::new();
+            loop {
+                let fr = frames[node as usize].as_u64().unwrap_or(0) as usize;
+                if let (Some(addr), Some(func)) =
+                    (addrs[fr].as_u64(), funcs[fr].as_u64().map(|x| x as usize))
+                {
+                    if let Some(res) = fn_["resource"][func].as_u64() {
+                        if let Some(li) = rt["lib"][res as usize].as_u64() {
+                            let lib = &libs[li as usize];
+                            let id = lib["codeId"].as_str().unwrap_or_default();
+                            if let Some(n) = symbols.resolve(id, addr) {
+                                chain.push(n);
+                            }
+                        }
+                    }
+                }
+                match prefixes[node as usize].as_u64() {
+                    Some(p) => node = p,
+                    None => break,
+                }
+            }
+            let hit = chain
+                .iter()
+                .rev()
+                .find_map(|n| phase_of(n))
+                .unwrap_or("unattributed");
+            let bucket = if is_cgu {
+                &mut e.parallel
+            } else {
+                &mut e.serial
+            };
+            *bucket.entry(hit.to_string()).or_insert(0) += 1;
+        }
+    }
+    let mut v: Vec<_> = units.into_values().filter(|u| u.total() > 0).collect();
+    v.sort_by_key(|u| std::cmp::Reverse(u.total()));
+    Ok(v)
+}
+
+/// Shape for the payload. Counts, not stacks: the payload stays proportional
+/// to distinct phases rather than to samples.
+pub fn to_json(units: &[UnitPhases], rate: u32) -> Value {
+    json!({
+        "sampler": "samply",
+        "rate_hz": rate,
+        "units": units.iter().map(|u| json!({
+            "crate": u.crate_name,
+            "crate_type": u.crate_type,
+            "serial": u.serial,
+            "parallel": u.parallel,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_rustc_command_line() {
+        let pn = "rustc --crate-name bun_css '--edition=2024' src/css/lib.rs --crate-type lib '--emit=dep-info,metadata,link'";
+        assert_eq!(
+            unit_of(pn),
+            Some(("bun_css".into(), "lib".into())),
+            "quoted args must not break the split"
+        );
+    }
+
+    #[test]
+    fn ignores_cargos_compiler_probe() {
+        // cargo runs this before building anything; counting it as a unit
+        // would invent a crate called `___`.
+        let pn = "rustc - --crate-name ___ '--print=file-names' --crate-type bin";
+        assert_eq!(unit_of(pn), None);
+    }
+
+    #[test]
+    fn maps_symbols_to_the_phase_rustc_calls_them() {
+        assert_eq!(phase_of("rustc_expand::mbe::expand"), Some("macro_expand"));
+        assert_eq!(phase_of("rustc_borrowck::mir_borrowck"), Some("borrowck"));
+        // hir_analysis encloses typeck, and -Ztime-passes calls the pair
+        // `type_check_crate`
+        assert_eq!(
+            phase_of("rustc_hir_analysis::check_crate"),
+            Some("type_check")
+        );
+        // the MIR pipeline borrowck drives is part of that span
+        assert_eq!(
+            phase_of("rustc_mir_transform::run_passes"),
+            Some("borrowck")
+        );
+        assert_eq!(phase_of("std::vec::Vec::push"), None);
+    }
+}

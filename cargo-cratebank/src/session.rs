@@ -213,44 +213,12 @@ pub struct Session {
     pub dir: PathBuf,
     /// Where the build wrote its artifacts (used locally, never sent).
     pub target_dir: Option<PathBuf>,
-    /// Unix start/end of the build, for matching sidecar rusage records.
-    pub window: (f64, f64),
     /// Crate names being sent — the only ones whose artifacts may be measured.
     pub public_crates: Vec<String>,
     pub run_id: String,
     pub events: Vec<Value>,
     pub header: Map<String, Value>,
     pub withheld: usize,
-}
-
-/// Unix start/end of a session, from its first and last event timestamps.
-fn time_window(events: &[Value]) -> (f64, f64) {
-    let parse = |v: &Value| -> Option<f64> {
-        // 2026-08-20T21:55:58.108826843Z -> seconds since epoch, roughly
-        let s = v["timestamp"].as_str()?;
-        let (date, rest) = s.split_once('T')?;
-        let mut d = date.split('-');
-        let (y, m, dd): (i64, i64, i64) = (
-            d.next()?.parse().ok()?,
-            d.next()?.parse().ok()?,
-            d.next()?.parse().ok()?,
-        );
-        let hms = rest.trim_end_matches('Z');
-        let mut t = hms.split(':');
-        let (hh, mm): (f64, f64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
-        let ss: f64 = t.next()?.parse().ok()?;
-        // days since epoch (civil algorithm), then seconds
-        let (y2, m2) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
-        let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
-        let yoe = y2 - era * 400;
-        let doy = (153 * (m2 - 3) + 2) / 5 + dd - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        let days = era * 146_097 + doe - 719_468;
-        Some(days as f64 * 86_400.0 + hh * 3600.0 + mm * 60.0 + ss)
-    };
-    let first = events.first().and_then(parse).unwrap_or(0.0);
-    let last = events.last().and_then(parse).unwrap_or(first + 86_400.0);
-    (first - 5.0, last + 5.0)
 }
 
 /// Read one session log, keeping only what may leave the machine.
@@ -299,7 +267,6 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
         h.insert("repository".into(), Value::from(r)); // link a public project properly
     }
     scrub_header(&mut header);
-    let window = time_window(&events);
     let public_crates = events
         .iter()
         .filter(|e| e["reason"] == "unit-registered")
@@ -308,7 +275,6 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
     Some(Session {
         dir: PathBuf::from(&ws),
         target_dir,
-        window,
         public_crates,
         run_id,
         events,
@@ -323,9 +289,8 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
 /// One session -> one payload. Raw events pass through verbatim (minus
 /// redaction): cargo's schema is explicitly unstable, so normalising here would
 /// bake in today's shape. Model server-side, log broadly.
-pub fn payload(s: &mut Session, build_env: Value, load: Value) -> Value {
+pub fn payload(s: &mut Session, build_env: Value, load: Value, phases: Value) -> Value {
     let (run_id, header) = (s.run_id.clone(), s.header.clone());
-    let (cpu_matched, cpu_total) = crate::rusage::merge(&mut s.events, s.window);
     let artifacts = s
         .target_dir
         .as_ref()
@@ -342,8 +307,7 @@ pub fn payload(s: &mut Session, build_env: Value, load: Value) -> Value {
         build_env,
         load,
         artifacts,
-        cpu_matched,
-        cpu_total,
+        phases,
         machine_json,
     )
 }
@@ -357,8 +321,7 @@ fn payload_inner(
     build_env: Value,
     load: Value,
     artifacts: Value,
-    cpu_matched: usize,
-    cpu_total: usize,
+    phases: Value,
     machine_json: Value,
 ) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
@@ -391,9 +354,9 @@ fn payload_inner(
         "machine": machine_json,
         "load": load,
         "artifacts": artifacts,
-        // per-unit CPU only exists if the rustc shim was in use; say how much
-        // of the graph it covered so an analysis never mistakes wall for CPU
-        "cpu_coverage": json!({"matched": cpu_matched, "units": cpu_total}),
+        // Per-unit compiler phases, sampled. Null when the build was not
+        // sampled -- an analysis must never read absence as zero.
+        "phases": phases,
         "build_env": build_env,
         // A session log has no build-finished event, so a build that failed
         // half way looks exactly like one that completed. Every registered

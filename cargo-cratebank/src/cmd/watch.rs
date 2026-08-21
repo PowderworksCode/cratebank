@@ -33,7 +33,6 @@ pub fn run(o: &Common) -> i32 {
     // the machine happened to be doing once it finished.
     let mut sampling: std::collections::HashMap<String, crate::load::Sampler> = Default::default();
     let mut sampled: std::collections::HashMap<String, Value> = Default::default();
-    crate::rusage::prune(); // sidecar rusage files older than a day
     loop {
         for path in sessions().into_iter().rev() {
             let rid = path
@@ -73,7 +72,12 @@ pub fn run(o: &Common) -> i32 {
                 continue;
             }
             let env = crate::buildenv::snapshot(&s.dir);
-            let body = payload(&mut s, env, sampled.remove(&rid).unwrap_or(Value::Null));
+            let body = payload(
+                &mut s,
+                env,
+                sampled.remove(&rid).unwrap_or(Value::Null),
+                Value::Null,
+            );
             match post(&o.endpoint, &body) {
                 Ok(_) => {
                     mark_sent(&rid);

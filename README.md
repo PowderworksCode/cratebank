@@ -116,7 +116,10 @@ and POSTs the rest.
 
 Consequences worth stating: nothing sits in the compile path, there is no
 conflict with `sccache` or any other `RUSTC_WRAPPER`, and no build is ever run
-on your behalf. Cache hits are recorded as cache events with no timing claim; a
+on your behalf. `cargo cratebank build` additionally runs the build under a
+sampler to measure where each crate's compile time went -- macro expansion
+against type checking against codegen -- which needs no compiler flags and so
+works on stable and on any rustc version. Cache hits are recorded as cache events with no timing claim; a
 miss is a genuine compile and measured as one.
 
 Cargo's log schema is explicitly still evolving, so events pass through
