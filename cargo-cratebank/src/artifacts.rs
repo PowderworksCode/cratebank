@@ -26,15 +26,21 @@ pub fn scan(target_dir: &Path) -> BTreeMap<String, Bytes> {
     let mut out: BTreeMap<String, Bytes> = BTreeMap::new();
     for profile in ["debug", "release"] {
         let deps = target_dir.join(profile).join("deps");
-        let Ok(rd) = std::fs::read_dir(&deps) else { continue };
+        let Ok(rd) = std::fs::read_dir(&deps) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
-            let Some(name) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(name) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
             let Ok(md) = e.metadata() else { continue };
             let size = md.len();
             // libfoo_bar-9a8b7c6d.rlib  ->  foo_bar
             let stem = name.strip_prefix("lib").unwrap_or(name);
-            let Some((crate_name, _hash)) = stem.rsplit_once('-') else { continue };
+            let Some((crate_name, _hash)) = stem.rsplit_once('-') else {
+                continue;
+            };
             let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
             let slot = out.entry(crate_name.to_string()).or_default();
             match ext {

@@ -317,6 +317,22 @@ Reporting `0.0` for a load average that does not exist would read as "idle
 machine" and bias every contention model built on the data, so those fields are
 null instead.
 
+## Compression
+
+Submissions are brotli-compressed at quality 11 — **10.6x** on real sessions,
+25 KB down to 2.4 KB, and 16% better than gzip. The `brotli` crate is pure Rust,
+so there is no C toolchain to find on any platform, and the slowest quality
+setting costs milliseconds on a payload this size.
+
+```
+sent …: 91 events, 43 units (11 withheld), 2 KB brotli from 25 KB -> …
+```
+
+No negotiation and no fallback. A send that fails is simply not recorded as
+sent, so the session stays queued and goes out next time — a failed upload
+costs a retry, not a contribution. `cargo cratebank serve` decompresses too, so
+the reference collector behaves like a real one.
+
 ## Payload
 
 One session, one POST. Events pass through **verbatim** under a small header:

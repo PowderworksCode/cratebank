@@ -41,9 +41,19 @@ fn psi_total(kind: &str) -> Option<u64> {
     line.split("total=").nth(1)?.trim().parse().ok()
 }
 
+/// What one sampling run observed.
+#[derive(Default, Clone, Copy)]
+struct Samples {
+    n: u64,
+    load_sum: f64,
+    load_max: f64,
+    cpu_sum: f64,
+    cpu_max: f64,
+}
+
 pub struct Sampler {
     stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<(u64, f64, f64, f64, f64)>>,
+    handle: Option<std::thread::JoinHandle<Samples>>,
     psi0: [Option<u64>; 3],
 }
 
@@ -55,33 +65,44 @@ impl Sampler {
         let s2 = stop.clone();
         let handle = std::thread::spawn(move || {
             let mut sys = sysinfo::System::new();
-            let (mut n, mut sum, mut max) = (0u64, 0.0f64, 0.0f64);
-            let (mut csum, mut cmax) = (0.0f64, 0.0f64);
+            let mut acc = Samples::default();
             // first CPU sample is meaningless: usage is a delta between refreshes
             cpu_busy(&mut sys);
             while !s2.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 let l = loadavg();
                 let c = cpu_busy(&mut sys) as f64;
-                n += 1;
-                sum += l;
-                csum += c;
-                if l > max { max = l; }
-                if c > cmax { cmax = c; }
+                acc.n += 1;
+                acc.load_sum += l;
+                acc.cpu_sum += c;
+                if l > acc.load_max {
+                    acc.load_max = l;
+                }
+                if c > acc.cpu_max {
+                    acc.cpu_max = c;
+                }
             }
-            (n, sum, max, csum, cmax)
+            acc
         });
         Sampler {
             stop,
             handle: Some(handle),
-            psi0: [psi_total(KINDS[0]), psi_total(KINDS[1]), psi_total(KINDS[2])],
+            psi0: [
+                psi_total(KINDS[0]),
+                psi_total(KINDS[1]),
+                psi_total(KINDS[2]),
+            ],
         }
     }
 
     pub fn finish(mut self) -> Value {
         self.stop.store(true, Ordering::Relaxed);
-        let (n, sum, max, csum, cmax) = self.handle.take()
-            .and_then(|h| h.join().ok()).unwrap_or((0, 0.0, 0.0, 0.0, 0.0));
+        let s = self
+            .handle
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let (n, sum, max, csum, cmax) = (s.n, s.load_sum, s.load_max, s.cpu_sum, s.cpu_max);
         let mut stall = serde_json::Map::new();
         for (i, k) in KINDS.iter().enumerate() {
             let d = match (self.psi0[i], psi_total(k)) {

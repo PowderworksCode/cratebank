@@ -16,46 +16,72 @@ use crate::ship::{already_sent, mark_sent, post};
 /// reruns a build script on every rebuild, so the build.rs trigger is
 /// best-effort, while the watcher sees every session cargo writes.
 fn run_key(p: &std::path::Path) -> String {
-    p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    p.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 pub fn run(o: &Common) -> i32 {
     let dir = log_dir();
     let _ = std::fs::create_dir_all(&dir);
-    eprintln!("cratebank: watching {} (every session from an opted-in workspace)", dir.display());
+    eprintln!(
+        "cratebank: watching {} (every session from an opted-in workspace)",
+        dir.display()
+    );
     // A session that is still being written is a build in progress: start
     // sampling now, so the load figure covers the build rather than whatever
     // the machine happened to be doing once it finished.
     let mut sampling: std::collections::HashMap<String, crate::load::Sampler> = Default::default();
     let mut sampled: std::collections::HashMap<String, Value> = Default::default();
-    crate::rusage::prune();   // sidecar rusage files older than a day
+    crate::rusage::prune(); // sidecar rusage files older than a day
     loop {
         for path in sessions().into_iter().rev() {
-            let rid = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let rid = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !already_sent(&rid) && !sampling.contains_key(&rid) && !sampled.contains_key(&rid) {
                 sampling.insert(rid.clone(), crate::load::Sampler::start());
             }
         }
         for path in sessions().into_iter().rev() {
-            let Some(ws) = session_workspace(&path) else { continue };
-            let run_id = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            if already_sent(&run_id) { continue; }
-            if !opted_in(std::path::Path::new(&ws)) { mark_sent(&run_id); continue; }
-            if !wait_quiet(&path, 2000, 3_600_000) { continue; }
+            let Some(ws) = session_workspace(&path) else {
+                continue;
+            };
+            let run_id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if already_sent(&run_id) {
+                continue;
+            }
+            if !opted_in(std::path::Path::new(&ws)) {
+                mark_sent(&run_id);
+                continue;
+            }
+            if !wait_quiet(&path, 2000, 3_600_000) {
+                continue;
+            }
             if let Some(sampler) = sampling.remove(&run_key(&path)) {
                 sampled.insert(run_key(&path), sampler.finish());
             }
-            let Some(mut s) = read_session(&path) else { continue };
+            let Some(mut s) = read_session(&path) else {
+                continue;
+            };
             let rid = s.run_id.clone();
-            if already_sent(&rid) { continue; }
+            if already_sent(&rid) {
+                continue;
+            }
             let env = crate::buildenv::snapshot(&s.dir);
             let body = payload(&mut s, env, sampled.remove(&rid).unwrap_or(Value::Null));
             match post(&o.endpoint, &body) {
                 Ok(_) => {
                     mark_sent(&rid);
                     let c = &body["counts"];
-                    eprintln!("sent {rid}: {} events, {} units ({} withheld), {} sections",
-                              c["events"], c["units"], c["units_withheld"], c["sections"]);
+                    eprintln!(
+                        "sent {rid}: {} events, {} units ({} withheld), {} sections",
+                        c["events"], c["units"], c["units_withheld"], c["sections"]
+                    );
                 }
                 Err(e) => eprintln!("cratebank: POST failed ({e}); will retry"),
             }
@@ -63,4 +89,3 @@ pub fn run(o: &Common) -> i32 {
         std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 }
-

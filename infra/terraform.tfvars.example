@@ -1,0 +1,23 @@
+# Copy to prod.tfvars (gitignored) and fill in.
+
+# API token: create at https://dash.cloudflare.com/profile/api-tokens
+#   Account | Workers Pipelines | Edit      (streams, sinks, pipelines)
+#   Account | Workers R2 Storage | Edit     (the bucket)
+#   Zone    | DNS | Edit                    (only if you set zone_id below)
+cloudflare_api_token = ""
+
+# Dashboard URL: dash.cloudflare.com/<this is your account id>
+account_id = ""
+
+# R2 S3 credentials for the sink. R2 > Manage R2 API Tokens > Create,
+# with Object Read & Write. These are separate from the token above.
+r2_access_key_id     = ""
+r2_secret_access_key = ""
+
+# Optional. Leave empty on a first apply: the CNAME is skipped and the output
+# gives you Cloudflare's raw endpoint to test against.
+zone_id   = ""
+zone_name = "cratebank.io"
+
+bucket_name     = "cratebank"
+bucket_location = "ENAM" # WNAM ENAM WEUR EEUR APAC OC

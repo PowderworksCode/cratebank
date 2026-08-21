@@ -137,12 +137,10 @@ of observations.
 
 ## Ingest
 
-ClickHouse: an append-only firehose of build events — cheap columnar
-aggregation, and the right home for a stream nobody wants to rewrite. At each
-stratum release, contributed data is compacted into that stratum's parquet
-alongside the archival round, tagged `source = archival | contributed` and
-`capture = clean | cached | incremental`, with fitted `speed_j` retained so
-anyone can re-derive normalised costs.
+An append-only feed of build events — see `ingest.md` for how it lands. Every
+row is tagged `source = archival | contributed`, `capture = clean | cached |
+incremental`, and `trust`, so anything reading the data later can weight or
+exclude by provenance rather than pooling it all.
 
 ## The build-environment census
 

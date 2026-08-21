@@ -6,7 +6,7 @@
 //! frontend/codegen section events to the same stream. We read what cargo
 //! already wrote.
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
@@ -15,14 +15,18 @@ use crate::cli::cargo_home;
 pub const SCHEMA: u32 = 1;
 
 /// The directory cargo writes session logs to.
-pub fn log_dir() -> PathBuf { cargo_home().join("log") }
+pub fn log_dir() -> PathBuf {
+    cargo_home().join("log")
+}
 
 /// Session logs, newest first.
 pub fn sessions() -> Vec<PathBuf> {
     let mut v: Vec<_> = std::fs::read_dir(log_dir())
-        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
-                    .collect())
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
+                .collect()
+        })
         .unwrap_or_default();
     v.sort();
     v.reverse();
@@ -55,11 +59,21 @@ pub fn scrub_header(ev: &mut Map<String, Value>) {
         ev.remove(k);
     }
     if let Some(Value::Array(cmd)) = ev.get("command") {
-        let kept: Vec<Value> = cmd.iter().filter_map(|a| a.as_str()).enumerate()
-            .map(|(i, a)| if i == 0 { "cargo".to_string() }
-                 else if a.starts_with('-') { a.to_string() }
-                 else { "<arg>".to_string() })
-            .map(Value::from).collect();
+        let kept: Vec<Value> = cmd
+            .iter()
+            .filter_map(|a| a.as_str())
+            .enumerate()
+            .map(|(i, a)| {
+                if i == 0 {
+                    "cargo".to_string()
+                } else if a.starts_with('-') {
+                    a.to_string()
+                } else {
+                    "<arg>".to_string()
+                }
+            })
+            .map(Value::from)
+            .collect();
         ev.insert("command".into(), Value::Array(kept));
     }
 }
@@ -73,22 +87,37 @@ pub fn scrub_header(ev: &mut Map<String, Value>) {
 pub fn declared_public(dir: &std::path::Path) -> Option<String> {
     let mut cur = Some(dir.to_path_buf());
     while let Some(d) = cur {
-        if let Ok(txt) = std::fs::read_to_string(d.join("Cargo.toml")) {
-            if let Ok(v) = txt.parse::<toml::Value>() {
-                for t in ["package", "workspace"] {
-                    let cb = v.get(t).and_then(|x| x.get("metadata")).and_then(|x| x.get("cratebank"));
-                    if cb.and_then(|x| x.get("public")).and_then(|x| x.as_bool()) == Some(true) {
-                        // link it properly: prefer the declared repository
-                        let repo = cb.and_then(|x| x.get("repository")).and_then(|x| x.as_str())
-                            .or_else(|| v.get("package").and_then(|p| p.get("repository"))
-                                         .and_then(|x| x.as_str()))
-                            .unwrap_or("").to_string();
-                        return Some(repo);
-                    }
-                }
-            }
+        if let Some(repo) = public_in_manifest(&d.join("Cargo.toml")) {
+            return Some(repo);
         }
         cur = d.parent().map(|x| x.to_path_buf());
+    }
+    None
+}
+
+/// `public = true` in one manifest, and the repository to link it by.
+fn public_in_manifest(path: &Path) -> Option<String> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    let v: toml::Value = txt.parse().ok()?;
+    for table in ["package", "workspace"] {
+        let cb = v
+            .get(table)
+            .and_then(|x| x.get("metadata"))
+            .and_then(|x| x.get("cratebank"));
+        if cb.and_then(|x| x.get("public")).and_then(|x| x.as_bool()) != Some(true) {
+            continue;
+        }
+        // link it properly: prefer the declared repository
+        let repo = cb
+            .and_then(|x| x.get("repository"))
+            .and_then(|x| x.as_str())
+            .or_else(|| {
+                v.get("package")
+                    .and_then(|p| p.get("repository"))
+                    .and_then(|x| x.as_str())
+            })
+            .unwrap_or("");
+        return Some(repo.to_string());
     }
     None
 }
@@ -112,7 +141,9 @@ pub fn filter_private(events: Vec<Value>, project_public: bool) -> (Vec<Value>, 
             let pid = e["package_id"].as_str().unwrap_or("");
             let public = is_public(pid) || (project_public && pid.starts_with("path+"));
             if !public {
-                if let Some(i) = e["index"].as_i64() { private_ix.insert(i); }
+                if let Some(i) = e["index"].as_i64() {
+                    private_ix.insert(i);
+                }
             }
         }
     }
@@ -121,23 +152,36 @@ pub fn filter_private(events: Vec<Value>, project_public: bool) -> (Vec<Value>, 
     // (`path+file:///home/me/code/…`). Identity should be the crate in the
     // repository, never the directory layout of the machine that built it.
     let canon = |pid: &str| -> String {
-        let Some(rest) = pid.strip_prefix("path+") else { return pid.to_string() };
-        let Some((path, tail)) = rest.split_once('#') else { return "workspace".into() };
+        let Some(rest) = pid.strip_prefix("path+") else {
+            return pid.to_string();
+        };
+        let Some((path, tail)) = rest.split_once('#') else {
+            return "workspace".into();
+        };
         // cargo writes `#name@version`, or just `#version` when the crate name
         // equals its directory -- recover the name so identity survives, then
         // discard the path entirely
         if tail.contains('@') {
             format!("workspace#{tail}")
         } else {
-            let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("crate");
+            let name = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("crate");
             format!("workspace#{name}@{tail}")
         }
     };
     let mut out = Vec::with_capacity(events.len());
     for e in events {
-        let mut o = match e { Value::Object(o) => o, _ => continue };
+        let mut o = match e {
+            Value::Object(o) => o,
+            _ => continue,
+        };
         if let Some(i) = o.get("index") {
-            if !keep_ix(i) { continue; }   // the unit itself is private
+            if !keep_ix(i) {
+                continue;
+            } // the unit itself is private
         }
         // edges may point at private units; prune rather than leak the index
         for arr in ["dependencies", "unblocked"] {
@@ -146,8 +190,14 @@ pub fn filter_private(events: Vec<Value>, project_public: bool) -> (Vec<Value>, 
                 o.insert(arr.into(), Value::Array(pruned));
             }
         }
-        if let Some(pid) = o.get("package_id").and_then(|v| v.as_str()).map(str::to_string) {
-            if pid.starts_with("path+") { o.insert("package_id".into(), Value::from(canon(&pid))); }
+        if let Some(pid) = o
+            .get("package_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if pid.starts_with("path+") {
+                o.insert("package_id".into(), Value::from(canon(&pid)));
+            }
         }
         if o.get("reason").and_then(|v| v.as_str()) == Some("build-started") {
             scrub_header(&mut o);
@@ -180,7 +230,11 @@ fn time_window(events: &[Value]) -> (f64, f64) {
         let s = v["timestamp"].as_str()?;
         let (date, rest) = s.split_once('T')?;
         let mut d = date.split('-');
-        let (y, m, dd): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+        let (y, m, dd): (i64, i64, i64) = (
+            d.next()?.parse().ok()?,
+            d.next()?.parse().ok()?,
+            d.next()?.parse().ok()?,
+        );
         let hms = rest.trim_end_matches('Z');
         let mut t = hms.split(':');
         let (hh, mm): (f64, f64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
@@ -215,29 +269,52 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
         let v: Value = serde_json::from_str(&line).ok()?;
         let obj = v.as_object()?.clone();
         if run_id.is_empty() {
-            run_id = obj.get("run_id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            run_id = obj
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
         }
         if obj.get("reason").and_then(|v| v.as_str()) == Some("build-started") {
             header = obj.clone();
-            ws = obj.get("workspace_root").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            target_dir = obj.get("target_dir").and_then(|v| v.as_str()).map(PathBuf::from);
+            ws = obj
+                .get("workspace_root")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            target_dir = obj
+                .get("target_dir")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from);
         }
         events.push(Value::Object(obj));
     }
-    if events.is_empty() { return None; }
+    if events.is_empty() {
+        return None;
+    }
     let repo = declared_public(std::path::Path::new(&ws));
     let (mut events, withheld) = filter_private(events, repo.is_some());
-    if let (Some(r), Some(Value::Object(h))) = (repo.filter(|r| !r.is_empty()), events.first_mut()) {
-        h.insert("repository".into(), Value::from(r));   // link a public project properly
+    if let (Some(r), Some(Value::Object(h))) = (repo.filter(|r| !r.is_empty()), events.first_mut())
+    {
+        h.insert("repository".into(), Value::from(r)); // link a public project properly
     }
     scrub_header(&mut header);
     let window = time_window(&events);
-    let public_crates = events.iter()
+    let public_crates = events
+        .iter()
         .filter(|e| e["reason"] == "unit-registered")
         .filter_map(|e| e["target"]["name"].as_str().map(str::to_string))
         .collect();
-    Some(Session { dir: PathBuf::from(&ws), target_dir, window, public_crates,
-                   run_id, events, header, withheld })
+    Some(Session {
+        dir: PathBuf::from(&ws),
+        target_dir,
+        window,
+        public_crates,
+        run_id,
+        events,
+        header,
+        withheld,
+    })
 }
 
 /// One session -> one payload. Raw events pass through verbatim (minus
@@ -249,25 +326,55 @@ pub fn read_session(path: &PathBuf) -> Option<Session> {
 pub fn payload(s: &mut Session, build_env: Value, load: Value) -> Value {
     let (run_id, header) = (s.run_id.clone(), s.header.clone());
     let (cpu_matched, cpu_total) = crate::rusage::merge(&mut s.events, s.window);
-    let artifacts = s.target_dir.as_ref()
+    let artifacts = s
+        .target_dir
+        .as_ref()
         .map(|d| crate::artifacts::report(d, &s.public_crates))
         .unwrap_or(Value::Null);
     let machine_json = crate::machine::snapshot(Some(&s.dir));
     let events = std::mem::take(&mut s.events);
     let withheld = s.withheld;
-    payload_inner(&run_id, events, &header, withheld, build_env, load, artifacts,
-                  cpu_matched, cpu_total, machine_json)
+    payload_inner(
+        &run_id,
+        events,
+        &header,
+        withheld,
+        build_env,
+        load,
+        artifacts,
+        cpu_matched,
+        cpu_total,
+        machine_json,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn payload_inner(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
-           withheld: usize, build_env: Value, load: Value, artifacts: Value,
-           cpu_matched: usize, cpu_total: usize, machine_json: Value) -> Value {
+fn payload_inner(
+    run_id: &str,
+    events: Vec<Value>,
+    header: &Map<String, Value>,
+    withheld: usize,
+    build_env: Value,
+    load: Value,
+    artifacts: Value,
+    cpu_matched: usize,
+    cpu_total: usize,
+    machine_json: Value,
+) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
-    let sections = events.iter()
-        .filter(|e| e["reason"] == "unit-section-finished").count();
-    let units = events.iter().filter(|e| e["reason"] == "unit-registered").count();
-    let repository = events.first().and_then(|e| e.get("repository")).cloned().unwrap_or(Value::Null);
+    let sections = events
+        .iter()
+        .filter(|e| e["reason"] == "unit-section-finished")
+        .count();
+    let units = events
+        .iter()
+        .filter(|e| e["reason"] == "unit-registered")
+        .count();
+    let repository = events
+        .first()
+        .and_then(|e| e.get("repository"))
+        .cloned()
+        .unwrap_or(Value::Null);
     json!({
         "cratebank_schema": SCHEMA,
         "client": concat!("cargo-cratebank ", env!("CARGO_PKG_VERSION")),
@@ -301,4 +408,3 @@ fn payload_inner(run_id: &str, events: Vec<Value>, header: &Map<String, Value>,
         "events": events,
     })
 }
-

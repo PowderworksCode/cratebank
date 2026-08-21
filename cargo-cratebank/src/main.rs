@@ -17,14 +17,13 @@
 mod artifacts;
 mod buildenv;
 mod cli;
+mod cmd;
 mod load;
 mod machine;
-mod cmd;
 mod project;
 mod rusage;
 mod session;
 mod ship;
-
 
 use cli::{Cli, Cmd};
 
@@ -33,10 +32,14 @@ fn main() {
     // real rustc as argv[1]. Detect that shape and go straight to the shim,
     // before clap sees a command line full of rustc flags.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.first().map(|a| {
-        let f = a.rsplit(['/', '\\']).next().unwrap_or(a);
-        f == "rustc" || f == "rustc.exe"
-    }).unwrap_or(false) {
+    if argv
+        .first()
+        .map(|a| {
+            let f = a.rsplit(['/', '\\']).next().unwrap_or(a);
+            f == "rustc" || f == "rustc.exe"
+        })
+        .unwrap_or(false)
+    {
         std::process::exit(rusage::shim(&argv));
     }
 
@@ -54,4 +57,3 @@ fn main() {
     };
     std::process::exit(code);
 }
-

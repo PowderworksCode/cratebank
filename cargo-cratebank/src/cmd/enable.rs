@@ -18,18 +18,25 @@ const BUILD_RS_SNIPPET: &str = r#"fn main() {
 
 /// The two unstable flags must be enabled at the WORKSPACE root, or a build
 /// started from the root never sees them.
-pub(crate) fn write_cargo_config(root: &std::path::Path, o: &Common, changed: &mut Vec<&'static str>) {
+pub(crate) fn write_cargo_config(
+    root: &std::path::Path,
+    o: &Common,
+    changed: &mut Vec<&'static str>,
+) {
     let cfg = root.join(".cargo").join("config.toml");
     let want = "[unstable]\nbuild-analysis = true\nsection-timings = true\n\n[build.analysis]\nenabled = true\n";
     let have = std::fs::read_to_string(&cfg).unwrap_or_default();
-    if have.contains("build-analysis") { return; }
+    if have.contains("build-analysis") {
+        return;
+    }
     if o.dry_run {
         println!("--- {} ---\n{want}", cfg.display());
-    } else {
-        let _ = std::fs::create_dir_all(cfg.parent().unwrap());
-        let _ = std::fs::write(&cfg, format!("{}{}{want}", have.trim_end(),
-                                             if have.trim().is_empty() { "" } else { "\n\n" }));
+        changed.push(".cargo/config.toml (workspace root): build-analysis + section-timings");
+        return;
     }
+    let separator = if have.trim().is_empty() { "" } else { "\n\n" };
+    let _ = std::fs::create_dir_all(cfg.parent().unwrap());
+    let _ = std::fs::write(&cfg, format!("{}{separator}{want}", have.trim_end()));
     changed.push(".cargo/config.toml (workspace root): build-analysis + section-timings");
 }
 
@@ -37,23 +44,36 @@ pub fn run(o: &Common) -> i32 {
     let dir = std::env::current_dir().unwrap_or_default();
     let manifest = dir.join("Cargo.toml");
     let Ok(txt) = std::fs::read_to_string(&manifest) else {
-        eprintln!("cratebank: no Cargo.toml here"); return 1;
+        eprintln!("cratebank: no Cargo.toml here");
+        return 1;
     };
     let mut changed = vec![];
     // A virtual workspace manifest has no [package]; writing package.metadata
     // there yields "missing field `package.name`" and breaks the manifest.
     let parsed = txt.parse::<toml::Value>().ok();
-    let is_package = parsed.as_ref().map(|v| v.get("package").is_some()).unwrap_or(false);
+    let is_package = parsed
+        .as_ref()
+        .map(|v| v.get("package").is_some())
+        .unwrap_or(false);
     let is_virtual_ws = !is_package
-        && parsed.as_ref().map(|v| v.get("workspace").is_some()).unwrap_or(false);
+        && parsed
+            .as_ref()
+            .map(|v| v.get("workspace").is_some())
+            .unwrap_or(false);
 
     if !opted_in(&dir) {
         let table = if is_package { "package" } else { "workspace" };
         let add = format!("\n[{table}.metadata.cratebank]\nshare = true\n");
-        if o.dry_run { println!("--- append to Cargo.toml ---{add}"); }
-        else { std::fs::write(&manifest, format!("{}{add}", txt.trim_end())).ok(); }
-        changed.push(if is_package { "Cargo.toml: [package.metadata.cratebank] share = true" }
-                     else { "Cargo.toml: [workspace.metadata.cratebank] share = true" });
+        if o.dry_run {
+            println!("--- append to Cargo.toml ---{add}");
+        } else {
+            std::fs::write(&manifest, format!("{}{add}", txt.trim_end())).ok();
+        }
+        changed.push(if is_package {
+            "Cargo.toml: [package.metadata.cratebank] share = true"
+        } else {
+            "Cargo.toml: [workspace.metadata.cratebank] share = true"
+        });
     }
 
     write_cargo_config(&workspace_root(&dir), o, &mut changed);
@@ -61,7 +81,9 @@ pub fn run(o: &Common) -> i32 {
     if is_virtual_ws {
         // The opt-in is inherited by members (opted_in walks up), but the
         // trigger must live in a package that actually builds.
-        for c in &changed { println!("  + {c}"); }
+        for c in &changed {
+            println!("  + {c}");
+        }
         println!("\nThis is a virtual workspace: the opt-in now covers all members.");
         println!("Run `cargo cratebank enable` inside one member to add the build.rs trigger,");
         println!("or use `cargo cratebank build` / a CI step instead.");
@@ -76,8 +98,11 @@ pub fn run(o: &Common) -> i32 {
     let mut manual: Option<String> = None;
     match &existing {
         None => {
-            if o.dry_run { println!("--- build.rs ---\n{BUILD_RS_SNIPPET}"); }
-            else { std::fs::write(&build_rs, BUILD_RS_SNIPPET).ok(); }
+            if o.dry_run {
+                println!("--- build.rs ---\n{BUILD_RS_SNIPPET}");
+            } else {
+                std::fs::write(&build_rs, BUILD_RS_SNIPPET).ok();
+            }
             changed.push("build.rs: created (spawns autosend --detach)");
             trigger_active = true;
         }
@@ -87,7 +112,7 @@ pub fn run(o: &Common) -> i32 {
             // inputs change, so a trigger inside it would rarely fire.
             let pinned = txt.contains("rerun-if");
             manual = Some(format!(
-"  You already have a build.rs, and cratebank will not edit it.
+                "  You already have a build.rs, and cratebank will not edit it.
 
   Either run the watcher (no edits needed, and it sees every build):
 
@@ -100,22 +125,36 @@ pub fn run(o: &Common) -> i32 {
           .status();
 {}",
                 if pinned {
-"
+                    "
   Note: that build.rs declares `rerun-if` directives, so cargo only reruns it
   when those inputs change -- a trigger inside it would fire rarely. The
   watcher is the better option here.
 "
-                } else { "" }));
+                } else {
+                    ""
+                }
+            ));
         }
     }
 
-    if o.dry_run { eprintln!("\ncratebank: dry run, nothing written"); return 0; }
-    if changed.is_empty() { println!("cratebank: already enabled here."); }
-    else { for c in &changed { println!("  + {c}"); } }
+    if o.dry_run {
+        eprintln!("\ncratebank: dry run, nothing written");
+        return 0;
+    }
+    if changed.is_empty() {
+        println!("cratebank: already enabled here.");
+    } else {
+        for c in &changed {
+            println!("  + {c}");
+        }
+    }
 
     if trigger_active {
-        println!("\nEvery `cargo build` on a nightly toolchain will now ship its session log to\n\
-                  {}\nafter the build finishes. Disable any time with  share = false.", o.endpoint);
+        println!(
+            "\nEvery `cargo build` on a nightly toolchain will now ship its session log to\n\
+                  {}\nafter the build finishes. Disable any time with  share = false.",
+            o.endpoint
+        );
     } else {
         println!("\nThis project is opted in, but nothing is sending yet:\n");
         println!("{}", manual.unwrap_or_default());
@@ -158,4 +197,3 @@ fn explain_machine_id(dir: &std::path::Path) {
         }
     }
 }
-

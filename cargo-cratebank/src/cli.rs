@@ -9,7 +9,11 @@ use clap::{Args, Parser, Subcommand};
 pub const DEFAULT_ENDPOINT: &str = "https://ingest.cratebank.io/v1/sessions";
 
 #[derive(Parser, Debug)]
-#[command(name = "cargo-cratebank", version, about = "Share the Rust build timings you were already producing")]
+#[command(
+    name = "cargo-cratebank",
+    version,
+    about = "Share the Rust build timings you were already producing"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -88,9 +92,9 @@ impl Cli {
 
 /// `$CARGO_HOME`, falling back to `~/.cargo`.
 pub fn cargo_home() -> PathBuf {
-    std::env::var("CARGO_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo")
-    })
+    std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo"))
 }
 
 /// CRATEBANK_DEBUG=1 explains why a send did or did not happen.
@@ -99,4 +103,3 @@ pub fn dbg(msg: &str) {
         eprintln!("cratebank[autosend] {msg}");
     }
 }
-

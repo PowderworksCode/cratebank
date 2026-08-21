@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::cli::{Common, SendArgs};
 use crate::session::{log_dir, payload, read_session, sessions};
-use crate::ship::post;
 
 pub fn run(o: &Common, a: &SendArgs) -> i32 {
     // shipped after the fact: no honest load figure is available
@@ -14,7 +13,11 @@ pub fn run(o: &Common, a: &SendArgs) -> i32 {
 pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
     let mut list = sessions();
     if let Some(id) = &a.session {
-        list.retain(|p| p.file_name().map(|f| f.to_string_lossy().contains(id)).unwrap_or(false));
+        list.retain(|p| {
+            p.file_name()
+                .map(|f| f.to_string_lossy().contains(id))
+                .unwrap_or(false)
+        });
     } else if !a.all {
         list.truncate(a.since);
     }
@@ -23,10 +26,12 @@ pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
         eprintln!("  enable them:  cargo cratebank status");
         return 1;
     }
-    crate::rusage::prune();   // sidecar rusage files older than a day
+    crate::rusage::prune(); // sidecar rusage files older than a day
     let mut sent = 0;
     for p in &list {
-        let Some(mut s) = read_session(p) else { continue };
+        let Some(mut s) = read_session(p) else {
+            continue;
+        };
         let run_id = s.run_id.clone();
         let env = crate::buildenv::snapshot(&s.dir);
         let body = payload(&mut s, env, load.clone());
@@ -34,18 +39,36 @@ pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;
         }
-        match post(&o.endpoint, &body) {
-            Ok(resp) => {
+        match crate::ship::post_sized(&o.endpoint, &body) {
+            Ok((resp, wire)) => {
                 sent += 1;
                 let c = &body["counts"];
-                println!("sent {run_id}: {} events, {} units ({} withheld), {} sections -> {} [{}]",
-                         c["events"], c["units"], c["units_withheld"], c["sections"],
-                         o.endpoint, resp.trim());
+                let (raw, _) = crate::ship::sizes(&body);
+                println!(
+                    "sent {run_id}: {} events, {} units ({} withheld), {} sections, \
+                          {:.0} KB brotli from {:.0} KB -> {} [{}]",
+                    c["events"],
+                    c["units"],
+                    c["units_withheld"],
+                    c["sections"],
+                    wire as f64 / 1024.0,
+                    raw as f64 / 1024.0,
+                    o.endpoint,
+                    resp.trim()
+                );
             }
             Err(e) => eprintln!("cratebank: POST {} failed: {e}", o.endpoint),
         }
     }
-    if o.dry_run { eprintln!("cratebank: dry run, nothing sent ({} session(s))", list.len()); }
-    if !o.dry_run && sent == 0 { 1 } else { 0 }
+    if o.dry_run {
+        eprintln!(
+            "cratebank: dry run, nothing sent ({} session(s))",
+            list.len()
+        );
+    }
+    if !o.dry_run && sent == 0 {
+        1
+    } else {
+        0
+    }
 }
-

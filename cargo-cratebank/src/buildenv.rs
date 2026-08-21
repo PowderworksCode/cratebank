@@ -34,7 +34,9 @@ const ENV_ALLOW: &[&str] = &[
     "CARGO_INCREMENTAL",
 ];
 
-fn has_path(v: &str) -> bool { v.contains('/') || v.contains('\\') }
+fn has_path(v: &str) -> bool {
+    v.contains('/') || v.contains('\\')
+}
 
 fn basename(v: &str) -> &str {
     v.rsplit(['/', '\\']).next().unwrap_or(v)
@@ -44,18 +46,28 @@ fn basename(v: &str) -> &str {
 /// directory it happens to live in is not build configuration.
 pub fn program_name(v: &str) -> Option<String> {
     let v = v.trim();
-    if v.is_empty() { return None; }
+    if v.is_empty() {
+        return None;
+    }
     Some(basename(v).to_string())
 }
 
 /// Classify one rustc flag. `None` means "never send this".
 pub fn sanitize_flag(tok: &str) -> Option<String> {
     let tok = tok.trim();
-    if tok.is_empty() { return None; }
-    if tok.starts_with("--remap-path-prefix") { return None; }
+    if tok.is_empty() {
+        return None;
+    }
+    if tok.starts_with("--remap-path-prefix") {
+        return None;
+    }
     let Some((name, value)) = tok.split_once('=') else {
         // no value: either a bare flag (-O, --verbose) or a path-shaped stray
-        return if has_path(tok) { None } else { Some(tok.to_string()) };
+        return if has_path(tok) {
+            None
+        } else {
+            Some(tok.to_string())
+        };
     };
     if !has_path(value) {
         return Some(tok.to_string());
@@ -71,7 +83,10 @@ const TAKES_VALUE: &[&str] = &["-C", "-Z", "-L", "-l", "--cfg", "--extern", "--e
 
 fn split_flags(raw: &str, encoded: bool) -> Vec<String> {
     let toks: Vec<String> = if encoded {
-        raw.split('\u{1f}').map(str::to_string).filter(|s| !s.is_empty()).collect()
+        raw.split('\u{1f}')
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .collect()
     } else {
         raw.split_whitespace().map(str::to_string).collect()
     };
@@ -106,15 +121,25 @@ fn cargo_config(dir: &std::path::Path) -> Map<String, Value> {
         return config_from_files(dir);
     }
     for line in stdout.lines() {
-        let Some((k, v)) = line.split_once(" = ") else { continue };
+        let Some((k, v)) = line.split_once(" = ") else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim().trim_matches('"'));
         let keep = match k {
             "build.incremental" | "build.target" | "build.jobs" => Some(v.to_string()),
             "build.rustc-wrapper" | "build.rustc-workspace-wrapper" => program_name(v),
             _ if k.starts_with("target.") && k.ends_with(".linker") => program_name(v),
-            _ if k == "build.rustflags" || (k.starts_with("target.") && k.ends_with(".rustflags")) => {
-                let flags: Vec<Value> = split_flags(v.trim_matches(['[', ']']).replace([',', '"'], " ").as_str(), false)
-                    .iter().filter_map(|f| sanitize_flag(f)).map(Value::from).collect();
+            _ if k == "build.rustflags"
+                || (k.starts_with("target.") && k.ends_with(".rustflags")) =>
+            {
+                let flags: Vec<Value> = split_flags(
+                    v.trim_matches(['[', ']']).replace([',', '"'], " ").as_str(),
+                    false,
+                )
+                .iter()
+                .filter_map(|f| sanitize_flag(f))
+                .map(Value::from)
+                .collect();
                 out.insert(k.to_string(), Value::Array(flags));
                 continue;
             }
@@ -132,25 +157,45 @@ fn cargo_config(dir: &std::path::Path) -> Map<String, Value> {
 /// the workspace's `.cargo/config.toml` and `$CARGO_HOME/config.toml`.
 fn config_from_files(dir: &std::path::Path) -> Map<String, Value> {
     let mut out = Map::new();
-    let files = [dir.join(".cargo").join("config.toml"),
-                 crate::cli::cargo_home().join("config.toml")];
-    for f in files.iter().rev() {   // workspace overrides home
-        let Ok(txt) = std::fs::read_to_string(f) else { continue };
-        let Ok(v) = txt.parse::<toml::Value>() else { continue };
-        let Some(build) = v.get("build") else { continue };
+    let files = [
+        dir.join(".cargo").join("config.toml"),
+        crate::cli::cargo_home().join("config.toml"),
+    ];
+    for f in files.iter().rev() {
+        // workspace overrides home
+        let Ok(txt) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        let Ok(v) = txt.parse::<toml::Value>() else {
+            continue;
+        };
+        let Some(build) = v.get("build") else {
+            continue;
+        };
         for key in ["incremental", "target", "jobs"] {
             if let Some(x) = build.get(key) {
-                out.insert(format!("build.{key}"), Value::from(x.to_string().trim_matches('"')));
+                out.insert(
+                    format!("build.{key}"),
+                    Value::from(x.to_string().trim_matches('"')),
+                );
             }
         }
         for key in ["rustc-wrapper", "rustc-workspace-wrapper"] {
-            if let Some(n) = build.get(key).and_then(|x| x.as_str()).and_then(program_name) {
+            if let Some(n) = build
+                .get(key)
+                .and_then(|x| x.as_str())
+                .and_then(program_name)
+            {
                 out.insert(format!("build.{key}"), Value::from(n));
             }
         }
         if let Some(fl) = build.get("rustflags").and_then(|x| x.as_array()) {
-            let flags: Vec<Value> = fl.iter().filter_map(|x| x.as_str())
-                .filter_map(sanitize_flag).map(Value::from).collect();
+            let flags: Vec<Value> = fl
+                .iter()
+                .filter_map(|x| x.as_str())
+                .filter_map(sanitize_flag)
+                .map(Value::from)
+                .collect();
             out.insert("build.rustflags".into(), Value::Array(flags));
         }
     }
@@ -161,16 +206,22 @@ fn config_from_files(dir: &std::path::Path) -> Map<String, Value> {
 pub fn snapshot(dir: &std::path::Path) -> Value {
     let mut env = Map::new();
     for key in ENV_ALLOW {
-        let Ok(raw) = std::env::var(key) else { continue };
+        let Ok(raw) = std::env::var(key) else {
+            continue;
+        };
         let value = match *key {
             "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" => {
                 let flags: Vec<Value> = split_flags(&raw, *key == "CARGO_ENCODED_RUSTFLAGS")
-                    .iter().filter_map(|f| sanitize_flag(f)).map(Value::from).collect();
+                    .iter()
+                    .filter_map(|f| sanitize_flag(f))
+                    .map(Value::from)
+                    .collect();
                 Value::Array(flags)
             }
-            "RUSTC_WRAPPER" | "RUSTC_WORKSPACE_WRAPPER" => {
-                match program_name(&raw) { Some(n) => Value::from(n), None => continue }
-            }
+            "RUSTC_WRAPPER" | "RUSTC_WORKSPACE_WRAPPER" => match program_name(&raw) {
+                Some(n) => Value::from(n),
+                None => continue,
+            },
             _ => Value::from(raw),
         };
         env.insert(key.to_string(), value);
@@ -184,30 +235,57 @@ mod tests {
 
     #[test]
     fn keeps_configuration_drops_paths() {
-        assert_eq!(sanitize_flag("-Copt-level=2").as_deref(), Some("-Copt-level=2"));
-        assert_eq!(sanitize_flag("-C target-cpu=native").as_deref(), Some("-C target-cpu=native"));
+        assert_eq!(
+            sanitize_flag("-Copt-level=2").as_deref(),
+            Some("-Copt-level=2")
+        );
+        assert_eq!(
+            sanitize_flag("-C target-cpu=native").as_deref(),
+            Some("-C target-cpu=native")
+        );
         assert_eq!(sanitize_flag("-Zthreads=8").as_deref(), Some("-Zthreads=8"));
         // linker identity survives, its directory does not
-        assert_eq!(sanitize_flag("-Clinker=/usr/bin/clang").as_deref(), Some("-Clinker=clang"));
+        assert_eq!(
+            sanitize_flag("-Clinker=/usr/bin/clang").as_deref(),
+            Some("-Clinker=clang")
+        );
         // a link arg naming the linker is configuration, not a path
-        assert_eq!(sanitize_flag("-Clink-arg=-fuse-ld=mold").as_deref(), Some("-Clink-arg=-fuse-ld=mold"));
+        assert_eq!(
+            sanitize_flag("-Clink-arg=-fuse-ld=mold").as_deref(),
+            Some("-Clink-arg=-fuse-ld=mold")
+        );
         // anything path-shaped loses its value
-        assert_eq!(sanitize_flag("-Clink-arg=/home/me/lib.a").as_deref(), Some("-Clink-arg=<path>"));
+        assert_eq!(
+            sanitize_flag("-Clink-arg=/home/me/lib.a").as_deref(),
+            Some("-Clink-arg=<path>")
+        );
         assert_eq!(sanitize_flag("-L/home/me/target").as_deref(), None);
-        assert_eq!(sanitize_flag("--remap-path-prefix=/home/me=/x").as_deref(), None);
+        assert_eq!(
+            sanitize_flag("--remap-path-prefix=/home/me=/x").as_deref(),
+            None
+        );
     }
 
     #[test]
     fn rejoins_spaced_flags() {
         let f = split_flags("-C target-cpu=native -Zthreads=8 -C lto=thin", false);
-        assert_eq!(f, vec!["-C target-cpu=native", "-Zthreads=8", "-C lto=thin"]);
+        assert_eq!(
+            f,
+            vec!["-C target-cpu=native", "-Zthreads=8", "-C lto=thin"]
+        );
         // and the rejoined form still classifies correctly
-        assert_eq!(sanitize_flag("-C linker=/usr/bin/clang").as_deref(), Some("-C linker=clang"));
+        assert_eq!(
+            sanitize_flag("-C linker=/usr/bin/clang").as_deref(),
+            Some("-C linker=clang")
+        );
     }
 
     #[test]
     fn program_identity_is_the_basename() {
-        assert_eq!(program_name("/usr/local/bin/sccache").as_deref(), Some("sccache"));
+        assert_eq!(
+            program_name("/usr/local/bin/sccache").as_deref(),
+            Some("sccache")
+        );
         assert_eq!(program_name("").as_deref(), None);
     }
 }
