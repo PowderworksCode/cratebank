@@ -14,11 +14,21 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-/// One-minute load average. Unix-only in substance: `sysinfo` reports zeros on
-/// Windows, so a Windows contribution simply carries no load figure rather
-/// than a fabricated one.
+/// One-minute load average — a unix concept. Windows has none, and no crate
+/// invents one honestly (systemstat's Windows implementation returns
+/// "Not supported"; sysinfo returns zeros), so it stays null off unix.
 fn loadavg() -> f64 {
     sysinfo::System::load_average().one
+}
+
+/// Machine-wide CPU utilisation, 0-100. This is the portable contention
+/// signal: every platform has it, and it says more directly than load average
+/// how busy the machine was while the build ran. (Load average also counts
+/// uninterruptible sleepers on Linux, so a disk-bound neighbour inflates it
+/// without competing for CPU.)
+fn cpu_busy(sys: &mut sysinfo::System) -> f32 {
+    sys.refresh_cpu_usage();
+    sys.global_cpu_usage()
 }
 
 /// Total stall time from the pressure-stall interface, in microseconds.
@@ -33,7 +43,7 @@ fn psi_total(kind: &str) -> Option<u64> {
 
 pub struct Sampler {
     stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<(u64, f64, f64)>>,
+    handle: Option<std::thread::JoinHandle<(u64, f64, f64, f64, f64)>>,
     psi0: [Option<u64>; 3],
 }
 
@@ -44,15 +54,22 @@ impl Sampler {
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = stop.clone();
         let handle = std::thread::spawn(move || {
+            let mut sys = sysinfo::System::new();
             let (mut n, mut sum, mut max) = (0u64, 0.0f64, 0.0f64);
+            let (mut csum, mut cmax) = (0.0f64, 0.0f64);
+            // first CPU sample is meaningless: usage is a delta between refreshes
+            cpu_busy(&mut sys);
             while !s2.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 let l = loadavg();
+                let c = cpu_busy(&mut sys) as f64;
                 n += 1;
                 sum += l;
+                csum += c;
                 if l > max { max = l; }
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                if c > cmax { cmax = c; }
             }
-            (n, sum, max)
+            (n, sum, max, csum, cmax)
         });
         Sampler {
             stop,
@@ -63,7 +80,8 @@ impl Sampler {
 
     pub fn finish(mut self) -> Value {
         self.stop.store(true, Ordering::Relaxed);
-        let (n, sum, max) = self.handle.take().and_then(|h| h.join().ok()).unwrap_or((0, 0.0, 0.0));
+        let (n, sum, max, csum, cmax) = self.handle.take()
+            .and_then(|h| h.join().ok()).unwrap_or((0, 0.0, 0.0, 0.0, 0.0));
         let mut stall = serde_json::Map::new();
         for (i, k) in KINDS.iter().enumerate() {
             let d = match (self.psi0[i], psi_total(k)) {
@@ -78,6 +96,8 @@ impl Sampler {
         json!({
             "loadavg_mean": if n > 0 && usable { json!(sum / n as f64) } else { Value::Null },
             "loadavg_max": if n > 0 && usable { json!(max) } else { Value::Null },
+            "cpu_busy_mean": if n > 0 { json!(csum / n as f64) } else { Value::Null },
+            "cpu_busy_max": if n > 0 { json!(cmax) } else { Value::Null },
             "samples": n,
             "stall_seconds": stall,
         })

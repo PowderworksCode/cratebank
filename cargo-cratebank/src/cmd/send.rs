@@ -6,6 +6,12 @@ use crate::session::{log_dir, payload, read_session, sessions};
 use crate::ship::post;
 
 pub fn run(o: &Common, a: &SendArgs) -> i32 {
+    // shipped after the fact: no honest load figure is available
+    run_with_load(o, a, Value::Null)
+}
+
+/// `build` measures load across the build it just ran, so it can supply one.
+pub fn run_with_load(o: &Common, a: &SendArgs, load: Value) -> i32 {
     let mut list = sessions();
     if let Some(id) = &a.session {
         list.retain(|p| p.file_name().map(|f| f.to_string_lossy().contains(id)).unwrap_or(false));
@@ -23,8 +29,7 @@ pub fn run(o: &Common, a: &SendArgs) -> i32 {
         let Some(mut s) = read_session(p) else { continue };
         let run_id = s.run_id.clone();
         let env = crate::buildenv::snapshot(&s.dir);
-        // shipped after the fact: no honest load figure is available
-        let body = payload(&mut s, env, Value::Null);
+        let body = payload(&mut s, env, load.clone());
         if o.dry_run {
             println!("{}", serde_json::to_string_pretty(&body).unwrap());
             continue;

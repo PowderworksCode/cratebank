@@ -275,9 +275,18 @@ excluded from the denominator: they run no compiler, so they can never have
 rustc CPU.
 
 **Machine load** — sampled *during* the build (`build` and `watch`, the two
-commands present for one): mean and max load average, plus pressure-stall
-deltas for cpu/io/memory. A session shipped after the fact with `send` reports
-`load: null` rather than a figure measured at the wrong time.
+commands present for one): mean and max **CPU utilisation**, mean and max load
+average, and pressure-stall deltas for cpu/io/memory.
+
+CPU utilisation is the portable measure and the one to model on: every platform
+has it, whereas load average is a unix concept that no crate shims honestly
+(systemstat's Windows implementation returns "Not supported"; sysinfo returns
+zeros). It is also the better signal even on Linux, where load average counts
+uninterruptible sleepers — a disk-bound neighbour inflates it without competing
+for CPU at all.
+
+A session shipped after the fact with `send` reports `load: null` rather than a
+figure measured at the wrong time.
 
 **Artifact bytes** — rmeta, rlib and object bytes per crate, scanned from the
 target directory when the build ends. rmeta tracks what the frontend had to
@@ -299,6 +308,7 @@ What differs, and is reported as absent rather than faked:
 | --- | --- | --- |
 | per-unit CPU | user + sys | user + kernel |
 | peak RSS | yes | not from `GetProcessTimes` — `null` |
+| CPU utilisation | yes | yes — the portable contention signal |
 | load average | yes | none exists — `null`, never `0.0` |
 | pressure stalls (PSI) | Linux only | `null` |
 | virtualization hint | Linux only | `null` |
@@ -339,7 +349,8 @@ server-side.
     "config": {"build.rustc-wrapper": "sccache", "build.incremental": "false"}
   },
   "cpu_coverage": {"matched": 34, "units": 34},
-  "load": {"loadavg_mean": 4.1, "loadavg_max": 9.8, "samples": 12,
+  "load": {"cpu_busy_mean": 99.5, "cpu_busy_max": 99.9,
+           "loadavg_mean": 8.49, "loadavg_max": 8.49, "samples": 7,
            "stall_seconds": {"cpu": 0.31, "io": 0.02, "memory": 0.0}},
   "artifacts": {"total": {"rmeta": 29190392, "rlib": 89460474, "obj": 0},
                 "per_crate": {"aho_corasick": {"rmeta": 1871852, "rlib": 10809004, "obj": 0}}},
