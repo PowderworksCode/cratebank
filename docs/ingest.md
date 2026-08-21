@@ -198,36 +198,36 @@ Measured on a real session (91 events, 43 units):
 
 | | bytes | vs compact |
 | --- | --- | --- |
-| compact JSON — what the client sends today | 25,928 | — |
-| gzip -9 | 2,912 | **8.9x** |
-| brotli q11 | 2,455 | 10.6x |
+| compact JSON | 25,928 | — |
+| gzip -9 | 2,912 | 8.9x |
+| **brotli q11 — what the client sends** | **2,455** | **10.6x** |
 | slimmed JSON (no repeated `run_id`, delta timestamps) | 18,829 | 1.4x |
 | slimmed **and** gzipped | 2,539 | 10.2x |
 
 Three conclusions, in order of how much they matter.
 
-**Compress the request body — done.** The client gzips every submission and
-falls back to plain on rejection, reporting which happened. Measured end to end
-at 8.8x against the reference collector. `flate2`'s default backend is pure Rust
-(miniz_oxide), so nothing needs a C toolchain — which matters on Windows, where
-the one dependency that does need one (`ring`, via TLS) is already the hard part
-of cross-building.
+**Compress the request body — done.** The client sends brotli q11 with
+`Content-Encoding: br`, measured at 10.6x on a real session (25 KB → 2.4 KB) and
+16% better than gzip. The `brotli` crate is pure Rust, so nothing needs a C
+toolchain — which matters on Windows, where the one dependency that does
+(`ring`, via TLS) is already the hard part of cross-building.
 
-Brotli would give another ~16% (`brotli`, also pure Rust) but gzip is
-universally accepted and the gap is small; it is worth adding only once the
-endpoint is confirmed to accept `br`.
+**No negotiation and no fallback.** The endpoint is treated as the dumbest thing
+that could work: it takes a blob and stores it, and anything that needs to read
+the contents does so later. If a send fails it is not recorded as sent, so the
+session stays queued and goes out next time — a failed upload costs a retry, not
+a contribution, which is what makes the simplicity affordable.
 
-*Still unverified:* inbound `Content-Encoding` is **undocumented** for Pipelines.
-The docs and the launch blog mention compression only for sink *output*; the one
-reference to GZIP on ingest belongs to the pre-Arroyo API. Cloudflare's edge
-transparently decompresses request bodies in other products, so it likely works
-— but the fallback exists precisely because "likely" is not a basis for
-discarding a contribution.
+Inbound `Content-Encoding` remains undocumented for Pipelines (the docs and
+launch blog cover compression only for sink *output*; the one GZIP-on-ingest
+reference belongs to the pre-Arroyo API). If it turns out the endpoint stores
+the compressed bytes rather than decompressing them, that is equally fine —
+processing happens later either way.
 
 **Do not slim the payload.** Dropping the `run_id` repeated on every event and
 delta-encoding timestamps removes 27% of the raw bytes — those two fields are a
-third of the payload — but only **13% once gzipped**, because repeated strings
-are exactly what LZ already collapses. That is a poor trade for reintroducing
+third of the payload — but almost nothing once compressed, because repeated
+strings are exactly what LZ already collapses. That is a poor trade for reintroducing
 client-side decisions about the payload's shape, which this design just removed.
 It becomes worth doing only if compression turns out to be unavailable.
 

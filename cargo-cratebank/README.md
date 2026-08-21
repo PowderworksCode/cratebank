@@ -319,21 +319,19 @@ null instead.
 
 ## Compression
 
-Submissions are gzipped — about **9x** on real sessions (25 KB → 3 KB), for the
-cost of a header. `flate2`'s pure-Rust backend does it, so there is no C
-toolchain to find on any platform.
-
-Inbound `Content-Encoding` is undocumented for the ingest endpoint, so a
-rejection is not treated as an error: the same body is sent again uncompressed,
-and the output says which happened.
+Submissions are brotli-compressed at quality 11 — **10.6x** on real sessions,
+25 KB down to 2.4 KB, and 16% better than gzip. The `brotli` crate is pure Rust,
+so there is no C toolchain to find on any platform, and the slowest quality
+setting costs milliseconds on a payload this size.
 
 ```
-sent …: 91 events, 43 units (11 withheld), 3 KB gzipped from 25 KB -> …
-sent …: 91 events, 43 units (11 withheld), 25 KB uncompressed -> …
+sent …: 91 events, 43 units (11 withheld), 2 KB brotli from 25 KB -> …
 ```
 
-A lost contribution is worse than a large one. `cargo cratebank serve`
-decompresses too, so the reference collector behaves like a real one.
+No negotiation and no fallback. A send that fails is simply not recorded as
+sent, so the session stays queued and goes out next time — a failed upload
+costs a retry, not a contribution. `cargo cratebank serve` decompresses too, so
+the reference collector behaves like a real one.
 
 ## Payload
 
