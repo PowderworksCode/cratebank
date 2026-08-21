@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::cli::{Common, SendArgs};
 use crate::session::{log_dir, payload, read_session, sessions};
-use crate::ship::post;
 
 pub fn run(o: &Common, a: &SendArgs) -> i32 {
     // shipped after the fact: no honest load figure is available
