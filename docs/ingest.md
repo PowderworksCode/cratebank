@@ -38,6 +38,80 @@ auth uses a Cloudflare API token scoped `Workers Pipeline Send` — an
 account-level credential that could not be shipped inside a public binary
 anyway.)
 
+## Authentication
+
+Pipelines' own stream auth uses a Cloudflare API token scoped `Workers Pipeline
+Send`. That is an **account-level credential**: shipping it inside a public
+binary would hand every contributor a key to the account, and revoking it would
+break every client at once. So stream auth is not the mechanism for a public
+census — the options are what sits in front.
+
+| option | code | credential | revocable | self-serve | notes |
+| --- | --- | --- | --- | --- | --- |
+| none (public stream) | none | — | — | — | submission counts untrustworthy |
+| **Access service tokens** | **none** | client id + secret, per consumer | per token | no — we issue them | config only; ideal for organisations |
+| **Worker + our tokens** | ~100 lines | our token, per contributor | per token | yes | most flexible; see below |
+| Worker + GitHub device flow | more | GitHub identity | per user | yes | strongest identity, most machinery |
+| mTLS / API Shield | none | client cert | per cert | no | too heavy for volunteers |
+
+Two are worth taking seriously.
+
+**Cloudflare Access service tokens** are pure configuration: a Service Auth
+policy on the ingest hostname, and callers present `CF-Access-Client-Id` and
+`CF-Access-Client-Secret`. Per-consumer, individually revocable, no code at all.
+The catch is that *we* issue every token, so it fits organisations ("here is
+Acme's credential") and not a volunteer who wants to contribute this afternoon.
+
+**A Worker in front of Pipelines** is the general answer, and it costs less than
+it sounds: Worker bindings need **no API token** at all — `await
+env.STREAM.send(events)` — so the Worker authenticates the contributor and
+forwards over a binding that carries no shippable secret.
+
+Tokens can be stateless: `token = id.HMAC(id, secret)`, verified with one
+secret in the Worker, no database. Revocation is a small KV denylist.
+Registration can be instant and anonymous (`cargo cratebank register`), which
+makes a token less an identity than a **handle** — something to rate-limit
+against and revoke, which an IP is not.
+
+### The Worker earns its keep beyond auth
+
+Auth is the reason to add it, but three other things fall out, and together they
+are worth more:
+
+1. **Flattening moves server-side.** The client can keep sending one session
+   object — the shape it already produces — and the Worker splits it into
+   `sessions` and `units` rows. The client stays dumb and the row schema can
+   change without a client release, which matters because contributors upgrade
+   slowly and cargo's log schema is still moving.
+2. **Batching moves server-side** too, so the 5 MB request limit stops being the
+   client's problem.
+3. **A version boundary.** Payload schema, stream layout and Pipelines config
+   can all change behind one stable endpoint.
+
+That reverses the client work this document originally called for: with a Worker,
+points 1–3 of *What has to change in the client* become the Worker's job, and the
+client only gains a token header.
+
+### Recommendation
+
+Ship both, for different contributors:
+
+- **Access service tokens** immediately, for named organisations. Zero code, and
+  it is the credential an enterprise contributor will expect to be able to
+  rotate and audit.
+- **A Worker with stateless HMAC tokens** as the general path, self-serve so the
+  long tail is not gated on us answering email.
+
+And tag every row with how it arrived — `trust: service | token | anonymous` —
+so an analysis can weight or exclude by provenance rather than trusting all
+submissions equally. If an anonymous tier is ever opened, that tag is what keeps
+it from contaminating everything else.
+
+The cost is honest: it is no longer a no-code ingest. The no-code path remains
+available and is the right way to *start* — a public stream, a WAF rate limit,
+and real data flowing this week — with the Worker added before the endpoint is
+advertised anywhere public.
+
 ## Two streams, because rows should be rows
 
 The client currently sends **one object per build**, with the events nested
@@ -141,11 +215,14 @@ Requires a Workers Paid plan ($5/month).
 
 ## What has to change in the client
 
-1. **Emit rows, not one nested object** — a `sessions` row, N `units` rows, and
-   the raw log, each posted to its own stream.
-2. **Batch** to stay under 5 MB per request.
-3. **Endpoint config per stream**, replacing the single `--endpoint`.
-4. Keep `--dry-run` printing exactly what would be posted, per stream.
+If ingest goes straight to Pipelines: emit rows rather than one nested object,
+batch under 5 MB, and take an endpoint per stream.
 
-Until those land, `cargo cratebank serve` remains the reference collector and
-the payload shape is unchanged.
+**If a Worker fronts it — the recommendation above — almost none of that.** The
+client keeps its current payload, gains an `Authorization` header, and the
+Worker does the flattening and batching. That is the better division of labour:
+schema changes ship at our deploy cadence rather than at the rate contributors
+upgrade a CLI.
+
+Either way `--dry-run` keeps printing exactly what would be sent, and
+`cargo cratebank serve` remains the reference collector.
