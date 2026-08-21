@@ -1,23 +1,34 @@
 # Copy to prod.tfvars (gitignored) and fill in.
 
 # API token: create at https://dash.cloudflare.com/profile/api-tokens
-#   Account | Workers Pipelines | Edit      (streams, sinks, pipelines)
-#   Account | Workers R2 Storage | Edit     (the bucket)
-#   Zone    | DNS | Edit                    (only if you set zone_id below)
+#   Account | Workers Scripts    | Edit    (deploying the Worker)
+#   Account | Workers R2 Storage | Edit    (the bucket)
+#   Zone    | Workers Routes     | Edit    (only if you set zone_id below)
+#   Zone    | DNS                | Edit    (the custom domain writes a record)
+#
+# Adding a Zone row makes a "Zone Resources" selector appear below Account
+# Resources. It defaults to All zones -- narrow it to this one zone.
 cloudflare_api_token = ""
 
 # Dashboard URL: dash.cloudflare.com/<this is your account id>
 account_id = ""
 
-# R2 S3 credentials for the sink. R2 > Manage R2 API Tokens > Create,
-# with Object Read & Write. These are separate from the token above.
+# Out-of-band R2 access (aws-cli, rclone). NOT used by the Worker, which
+# reaches the bucket through a binding and needs no credential.
+# R2 object storage > Account Details > Manage next to API Tokens,
+# with Object Read & Write. Separate from the token above.
 r2_access_key_id     = ""
 r2_secret_access_key = ""
 
-# Optional. Leave empty on a first apply: the CNAME is skipped and the output
-# gives you Cloudflare's raw endpoint to test against.
+# Optional. Leave empty on a first apply: the custom domain is skipped and the
+# Worker is reachable at its workers.dev subdomain, so the path is testable
+# before the domain exists.
 zone_id   = ""
 zone_name = "cratebank.io"
+
+# Bearer token guarding the compactor's manual POST /compact trigger.
+# Any random string: openssl rand -hex 24
+compact_secret = ""
 
 bucket_name     = "cratebank"
 bucket_location = "ENAM" # WNAM ENAM WEUR EEUR APAC OC

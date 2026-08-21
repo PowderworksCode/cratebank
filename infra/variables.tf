@@ -1,5 +1,5 @@
 variable "cloudflare_api_token" {
-  description = "API token with Pipelines, R2 and DNS edit permissions"
+  description = "API token with Workers Scripts, R2, Workers Routes and DNS edit permissions"
   type        = string
   sensitive   = true
 }
@@ -10,7 +10,7 @@ variable "account_id" {
 }
 
 variable "zone_id" {
-  description = "Zone id for cratebank.io. Leave empty to skip the CNAME and use the raw Cloudflare endpoint -- useful for a first test apply before the domain is set up."
+  description = "Zone id for cratebank.io. Leave empty to skip the Workers custom domain and use the workers.dev subdomain -- useful for a first test apply before the domain is set up."
   type        = string
   default     = ""
 }
@@ -32,8 +32,9 @@ variable "bucket_location" {
   default     = "ENAM"
 }
 
-# R2 credentials for the sink. Kept as variables rather than created with
-# cloudflare_api_token so the secret does not land in Terraform state.
+# Out-of-band R2 access (aws-cli, rclone). The Worker does not use these -- it
+# reaches the bucket through a binding. Kept as variables rather than minted by
+# Terraform so the token that runs this cannot also create credentials.
 variable "r2_access_key_id" {
   type      = string
   sensitive = true

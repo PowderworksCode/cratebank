@@ -1,0 +1,9 @@
+{
+  // Terraform is the deploy path (see ../main.tf). This file exists so the
+  // Worker can be run locally -- `wrangler dev --local` gives a simulated R2
+  // binding, so the whole put-a-blob path is testable offline.
+  "name": "cratebank-ingest",
+  "main": "ingest.js",
+  "compatibility_date": "2026-08-21",
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "cratebank" }]
+}
