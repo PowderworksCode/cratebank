@@ -25,12 +25,22 @@ nothing at ingest*.
 
 ## The endpoint
 
+The client posts to **our** hostname, never Cloudflare's:
+
 ```
-POST https://{stream-id}.ingest.cloudflare.com
+POST https://ingest.cratebank.io
 Content-Type: application/json
 
-[ {...}, {...} ]          # a JSON array of rows, not a single object
+[ {...}, {...} ]          # a JSON array, not a single object
 ```
+
+`ingest.cratebank.io` is a CNAME to the stream's
+`{stream-id}.ingest.cloudflare.com`. That indirection is worth having from the
+first request: the stream id is an implementation detail, streams cannot be
+altered after creation so we will eventually need to move to a new one, and a
+released client that hardcodes a Cloudflare hostname can never be redirected.
+Contributors upgrade slowly; the name they were shipped with has to remain
+correct.
 
 Authentication is **optional per stream**, and v1 runs with it off: a
 contributor needs no account, no token, no signup. (Pipelines' own auth uses a
@@ -92,9 +102,6 @@ That reverses the client work this document originally called for: with a Worker
 points 1–3 of *What has to change in the client* become the Worker's job, and the
 client only gains a token header.
 
-Registration — how a contributor gets that token in one command, without an
-account or an email — is specified in [`registration.md`](registration.md).
-
 ### Decision: start authless
 
 **v1 ships with no authentication.** A public Pipelines stream, a WAF rate limit,
@@ -125,9 +132,9 @@ Two things make this reversible rather than a trap:
    contributors are people we asked directly; it stops being fine the moment a
    README says "run this and share your builds".
 
-When it is time, the path is already designed:
-[`registration.md`](registration.md) for self-serve keys, and Access service
-tokens for organisations that want a credential they can rotate and audit.
+When it is time, the options are above: Access service tokens for organisations
+that want a credential they can rotate and audit, or a Worker issuing
+self-serve keys so the long tail is not gated on us answering email.
 
 ## One stream, stored verbatim
 
@@ -160,17 +167,11 @@ cargo-cratebank ──POST──▶ [stream: unstructured] ──▶ [sink: R2 p
 The payload lands as one row per build with its JSON intact. Nothing is
 interpreted at ingest, so nothing can be lost by interpreting it wrongly.
 
-### Where the tables come from
-
-The `sessions` and `units` tables in `schema.md` are **derived**, built by the
-stratum job — which runs DuckDB, and therefore has joins, aggregation and window
-functions. Correlating `unit-registered` with `unit-finished` by index is a
-one-line join there and impossible in streaming SQL.
-
-That is the right division: ingest keeps bytes, analysis makes tables, and the
-table definitions can be rewritten and rerun over the whole archive whenever our
-understanding improves. A flattening decision baked into a Pipelines statement
-could only ever be applied going forward.
+Anything that wants rows rather than payloads reads them out later, with a real
+query engine that has joins. Correlating `unit-registered` with `unit-finished`
+by index is trivial there and impossible in streaming SQL — and, unlike a
+transform baked into the pipeline, a reading done later can be corrected and
+rerun over everything already collected.
 
 ## Limits, and the one that binds
 
@@ -206,22 +207,12 @@ Which produces exactly the layout the schema doc assumed:
 ```
 cratebank/
   raw/year=2026/month=09/day=03/*.parquet     # what arrived, verbatim
-  2026-09/tables/{sessions,units,classes}.parquet   # derived by the stratum job
 ```
 
 Hive-style partitioning is what every engine expects, so
-`SELECT … FROM 'https://data.cratebank.io/units/**/*.parquet'` works in DuckDB
+`SELECT … FROM 'https://data.cratebank.io/raw/**/*.parquet'` works in DuckDB
 directly, and partition pruning happens automatically for date-filtered
 queries. R2's zero egress is what makes serving that publicly sane.
-
-## Strata
-
-Daily partitions are the raw feed. A **stratum** is a monthly immutable
-release: the day partitions compacted into larger files, deduplicated,
-schema-normalised, and published under `cratebank/2026-09/`. That is a batch
-job — the first piece of this system that genuinely needs code — and it is
-deliberately *after* ingest, so the pipeline works before the release process
-exists.
 
 ## Abuse, honestly
 

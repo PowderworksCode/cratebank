@@ -155,6 +155,5 @@ endpoint that needs no account to contribute to. R2's zero egress is what makes
 `SELECT … FROM 'https://data.cratebank.io/units/**/*.parquet'` a public
 interface rather than a bill.
 
-Not yet built: the pipelines themselves, the client changes to emit rows rather
-than one nested object, and the stratum builder that compacts daily partitions
-into immutable monthly releases.
+Not yet built: the pipelines themselves, and batching in the client for builds
+that exceed the 5 MB request limit.
