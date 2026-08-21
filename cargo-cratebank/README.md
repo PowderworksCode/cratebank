@@ -197,6 +197,28 @@ flags in the **workspace root's** `.cargo/config.toml`, and a small `build.rs`
 trigger. After that an ordinary `cargo build` ships its session log — nothing
 cratebank-shaped in the command.
 
+**If the project already has a `build.rs`, cratebank does not touch it.** That
+is somebody's build logic and a trigger is not worth the risk of mangling it.
+Enable says so, prints the three lines to add if you want them, and — this is
+the part that matters — does *not* claim sending is active when it is not:
+
+```
+This project is opted in, but nothing is sending yet:
+
+  You already have a build.rs, and cratebank will not edit it.
+
+  Either run the watcher (no edits needed, and it sees every build):
+
+      cargo cratebank watch
+
+  or add these three lines to its main(): …
+```
+
+If that build.rs declares `rerun-if` directives, enable adds a note: cargo then
+reruns it only when those inputs change, so a trigger inside it would fire
+rarely, and the watcher is the better answer. Sessions are recorded either way —
+`cargo cratebank send` ships them whenever you like.
+
 | path | reliability |
 | --- | --- |
 | **`cargo cratebank watch`** (recommended) | sees **every** build, and clears any backlog |

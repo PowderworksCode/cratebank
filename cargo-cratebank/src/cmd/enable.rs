@@ -68,26 +68,60 @@ pub fn run(o: &Common) -> i32 {
         return 0;
     }
 
+    // Never touch an existing build.rs: it is somebody's build logic, and a
+    // trigger is not worth the risk of mangling it.
     let build_rs = dir.join("build.rs");
-    if !build_rs.exists() {
-        if o.dry_run { println!("--- build.rs ---
-{BUILD_RS_SNIPPET}"); }
-        else { std::fs::write(&build_rs, BUILD_RS_SNIPPET).ok(); }
-        changed.push("build.rs: created (spawns autosend --detach)");
-    } else if !std::fs::read_to_string(&build_rs).unwrap_or_default().contains("cargo-cratebank") {
-        println!("build.rs already exists — add these three lines to its main():
-");
-        println!("    let _ = std::process::Command::new(\"cargo-cratebank\")");
-        println!("        .args([\"cratebank\", \"autosend\", \"--detach\"])");
-        println!("        .status();\n");
+    let existing = std::fs::read_to_string(&build_rs).ok();
+    let mut trigger_active = false;
+    let mut manual: Option<String> = None;
+    match &existing {
+        None => {
+            if o.dry_run { println!("--- build.rs ---\n{BUILD_RS_SNIPPET}"); }
+            else { std::fs::write(&build_rs, BUILD_RS_SNIPPET).ok(); }
+            changed.push("build.rs: created (spawns autosend --detach)");
+            trigger_active = true;
+        }
+        Some(txt) if txt.contains("cargo-cratebank") => trigger_active = true,
+        Some(txt) => {
+            // A build script with rerun-if directives runs only when those
+            // inputs change, so a trigger inside it would rarely fire.
+            let pinned = txt.contains("rerun-if");
+            manual = Some(format!(
+"  You already have a build.rs, and cratebank will not edit it.
+
+  Either run the watcher (no edits needed, and it sees every build):
+
+      cargo cratebank watch
+
+  or add these three lines to its main():
+
+      let _ = std::process::Command::new(\"cargo-cratebank\")
+          .args([\"cratebank\", \"autosend\", \"--detach\"])
+          .status();
+{}",
+                if pinned {
+"
+  Note: that build.rs declares `rerun-if` directives, so cargo only reruns it
+  when those inputs change -- a trigger inside it would fire rarely. The
+  watcher is the better option here.
+"
+                } else { "" }));
+        }
     }
 
     if o.dry_run { eprintln!("\ncratebank: dry run, nothing written"); return 0; }
     if changed.is_empty() { println!("cratebank: already enabled here."); }
     else { for c in &changed { println!("  + {c}"); } }
 
-    println!("\nEvery `cargo build` on a nightly toolchain will now ship its session log to\n\
-              {}\nafter the build finishes. Disable any time with  share = false.", o.endpoint);
+    if trigger_active {
+        println!("\nEvery `cargo build` on a nightly toolchain will now ship its session log to\n\
+                  {}\nafter the build finishes. Disable any time with  share = false.", o.endpoint);
+    } else {
+        println!("\nThis project is opted in, but nothing is sending yet:\n");
+        println!("{}", manual.unwrap_or_default());
+        println!("  Sessions are recorded either way -- `cargo cratebank send` ships them");
+        println!("  whenever you like. Disable any time with  share = false.");
+    }
     explain_machine_id(&dir);
     0
 }
