@@ -12,7 +12,17 @@ path = "src/main.rs"
 [dependencies]
 serde_json = "1"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-brotli = "8"
+# zstd: brotli-class ratios, and DuckDB decompresses it natively -- so a raw
+# uploaded blob is directly queryable from R2 with no conversion step. brotli
+# is NOT readable by DuckDB (verified), which is why it lost.
+#
+# This is a C dependency (zstd-sys, built via `cc`), which is only acceptable
+# because `ring` -- pulled in by ureq -> rustls for TLS -- already requires a C
+# toolchain to build this crate at all. If the TLS provider is ever swapped for
+# a pure-Rust one, this becomes the blocker: there is no pure-Rust zstd
+# *encoder* (ruzstd decodes only). Make that a deliberate choice, not a
+# surprise.
+zstd = "0.13"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 ureq = { version = "2", default-features = false, features = ["tls"] }
