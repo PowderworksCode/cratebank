@@ -76,12 +76,12 @@ in the archive.
 | whole-build envelope: process-tree CPU/wall/RSS + reconciliation vs Σ classes | whyslow measure | MUST |
 | schedule Gantt + realized parallelism + critical path | derived from B timestamps | DRV |
 
-## G. Era (once per stratum)
+## G. Environment (once per measurement run)
 
 Machine identity (CPU model, cores, memory, kernel, governor), load+PSI
 timeline for the whole run, toolchain hashes, sccache-disabled and
-incremental-off attestations, filtered env snapshot, stratum id and date,
-corpus list with pins, randomization seeds and shard plan, tool git revs.
+incremental-off attestations, filtered env snapshot, corpus list with pins,
+randomization seeds and shard plan, tool git revs.
 
 ## H. Replicates
 
@@ -90,53 +90,27 @@ design) are kept as rows, never averaged at capture — they are the noise
 floor. The schedule position of each build (what else was running) rides
 along from B.
 
-## I. Publication (the R2 idea)
+## I. Publication
 
-Object storage layout, one prefix per stratum, immutable:
+Measurements are published as parquet on object storage, partitioned by date,
+with raw instrument outputs alongside. Zero-egress storage makes the query
+surface free to serve, so the public interface is `ATTACH` plus SQL rather than
+an API.
 
-```
-cratebank/2026-08/
-  tables/          classes, measurements, projects, fits — parquet (canonical)
-  cratebank.duckdb convenience database: same tables + predefined views
-  raw/{class}/     self-profile.zst, mono.json.zst, timings.html.zst, stderr
-  manifest.json    era record (G), schema version, checksums
-```
+- **Publish**: measurements, raw instrument outputs, metadata. At top-1000
+  scale raw self-profiles dominate: O(1-5 MB) x O(20k classes).
+- **Do not publish**: compiled artifacts (huge, pointless, a supply-chain
+  liability). Sources are assumed available — crates.io and pinned repos are the
+  archive; we store pins and patches only.
+- **Keying**: `class_id` is the fingerprint hash WITHOUT the toolchain, so
+  identity is the specimen and the toolchain is an observed condition. Two
+  measurements of one class under different nightlies join on `class_id`, which
+  is what makes "same class, new compiler, what moved?" a query rather than a
+  project.
 
-- **Parquet is the canonical archive format**: frozen spec, every engine reads
-  it (DuckDB, polars, pandas, DataFusion), HTTP range reads work, and a
-  stratum is an append, never a rewrite. The **.duckdb file is a convenience
-  layer** regenerated from the parquet — single-file `ATTACH`, plus shipped
-  views/macros so the standard queries (below) are one-liners. Canonical data
-  never lives only in the .duckdb.
-- **Summability is a schema feature, not a query exercise.** Every class row
-  carries array columns: `dep_class_ids` (direct edges — the graph) and
-  `cone_class_ids` (precomputed transitive closure). Every project row carries
-  `unit_class_ids` (its view). Any aggregate is one unnest + join, no
-  recursive CTEs:
-
-  ```sql
-  -- what does tokio-with-its-whole-cone cost to compile?
-  SELECT sum(m.cpu_s)
-  FROM classes c, unnest(c.cone_class_ids) AS t(id)
-  JOIN measurements m ON m.class_id = t.id AND m.era = '2026-08'
-  WHERE c.name = 'tokio' AND c.era = '2026-08';
-  ```
-
-- **Keying: `class_id` is the fingerprint hash WITHOUT the toolchain; the
-  measurement key is `(class_id, era)`.** Identity = the specimen; era = when
-  it was measured. Consequence: strata join on `class_id`, so every monthly
-  release is automatically a compiler-regression instrument at ecosystem
-  scale — "same class, new nightly, what moved" is one join. (rustc-perf's
-  question, answered over 20k real compilation classes instead of a fixed
-  benchmark suite.)
-- **Publish**: measurements, raw instrument outputs, metadata, tables.
-  Ballpark per stratum at top-1000 scale: raw self-profiles dominate,
-  O(1–5 MB) × O(20k classes) ≈ 20–100 GB compressed; tables are GBs.
-- **Do not publish**: compiled artifacts (huge, pointless, supply-chain
-  liability). Sources are assumed available (crates.io + pinned repos);
-  the archive stores pins and patches, nothing more.
-- R2's zero egress makes "others examine it" free; the public interface is
-  `ATTACH` + SQL, no server.
+How and when that data is aggregated, compacted or released is deliberately not
+specified here. It depends on what the data turns out to look like, and
+committing to a shape now would only constrain a decision better made later.
 
 ## The one new instrument this demands
 
