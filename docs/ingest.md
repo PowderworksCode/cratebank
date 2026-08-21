@@ -182,14 +182,62 @@ Measured against real payloads: ~398 bytes per event, so a 1,000-unit build
 projects to **≈3.0 MB in one request** — under the limit, but not by much, and
 the fleet's largest projects are that size. Two consequences:
 
-The client must **batch**: split oversized builds across several requests. This
-is the only client change v1 needs — a session's events are independent rows in
-the array, so splitting is mechanical, and the session header rides with each
-chunk so partial delivery is still interpretable.
+The client must **batch** if the limit counts decompressed bytes: split
+oversized builds across several requests, with the session header on each chunk
+so partial delivery stays interpretable. If it counts compressed bytes, the
+largest builds are ~260 KB and batching is unnecessary — see *Payload size*
+below.
 
 The 5 MB/s per-stream ingest rate is the one to watch at scale: it is roughly
 150 medium builds per second, which is a long way off, but it is a per-stream
 cap and the fix is more streams (20 allowed) or a limit-increase request.
+
+## Payload size
+
+Measured on a real session (91 events, 43 units):
+
+| | bytes | vs compact |
+| --- | --- | --- |
+| compact JSON — what the client sends today | 25,928 | — |
+| gzip -9 | 2,912 | **8.9x** |
+| brotli q11 | 2,455 | 10.6x |
+| slimmed JSON (no repeated `run_id`, delta timestamps) | 18,829 | 1.4x |
+| slimmed **and** gzipped | 2,539 | 10.2x |
+
+Three conclusions, in order of how much they matter.
+
+**Compress the request body.** An 8.9x reduction for a header, no schema change,
+and nothing to maintain. A 1,000-unit build goes from ~2.3 MB to roughly 260 KB.
+Brotli is better still, but gzip is universally accepted and the gap is small;
+try brotli, fall back to gzip, fall back to plain.
+
+*Unverified:* Cloudflare documents compression for sink **output**, not for
+inbound request bodies. Their edge does transparently decompress request bodies
+in other products, so this likely works, but it has to be confirmed against the
+real endpoint — and the client must fall back rather than assume, since a
+rejected upload is a lost contribution.
+
+**Do not slim the payload.** Dropping the `run_id` repeated on every event and
+delta-encoding timestamps removes 27% of the raw bytes — those two fields are a
+third of the payload — but only **13% once gzipped**, because repeated strings
+are exactly what LZ already collapses. That is a poor trade for reintroducing
+client-side decisions about the payload's shape, which this design just removed.
+It becomes worth doing only if compression turns out to be unavailable.
+
+**Do not send parquet from the client.** It would be smaller again — columnar,
+dictionary-encoded, zstd — but the ingest endpoint takes JSON, so parquet means
+writing to R2 directly, which needs credentials, which needs a Worker. That
+trades the no-code ingest for a marginal gain over gzip, and it puts schema
+decisions back in the client where a released binary freezes them. The place
+parquet belongs is the sink, where it already is.
+
+### One open question
+
+Whether the 5 MB request limit counts compressed or decompressed bytes. If
+compressed, batching is unnecessary — the largest builds land around 260 KB —
+and the client needs no changes at all for v1. If decompressed, batching stays
+as designed. Worth establishing before writing the batching code, since the
+answer may delete it.
 
 ## Storage layout
 
