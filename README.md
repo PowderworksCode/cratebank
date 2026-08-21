@@ -148,6 +148,13 @@ verbatim under a versioned envelope rather than being normalised client-side.
 Early. The design docs and the client exist and are tested end to end against a
 local collector; the client is not yet published to crates.io.
 
-Not yet built: the ingest service, the stratum builder that compacts
-contributed data into immutable monthly releases, and publication to object
-storage (parquet, queryable directly over HTTP with DuckDB — no server).
+**Ingest and storage are designed** ([`docs/ingest.md`](docs/ingest.md)):
+Cloudflare Pipelines takes JSON over HTTP, transforms it with SQL, and writes
+date-partitioned zstd parquet to R2 — no server code on our side, and an
+endpoint that needs no account to contribute to. R2's zero egress is what makes
+`SELECT … FROM 'https://data.cratebank.io/units/**/*.parquet'` a public
+interface rather than a bill.
+
+Not yet built: the pipelines themselves, the client changes to emit rows rather
+than one nested object, and the stratum builder that compacts daily partitions
+into immutable monthly releases.
