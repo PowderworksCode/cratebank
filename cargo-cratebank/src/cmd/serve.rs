@@ -17,7 +17,9 @@ fn read_request(s: &mut std::net::TcpStream) -> Vec<u8> {
             Ok(n) => n,
         };
         buf.extend_from_slice(&tmp[..n]);
-        let Some(head_end) = find_header_end(&buf) else { continue };
+        let Some(head_end) = find_header_end(&buf) else {
+            continue;
+        };
         if buf.len() - head_end >= content_length(&buf[..head_end]) {
             break;
         }
@@ -41,7 +43,10 @@ fn content_length(head: &[u8]) -> usize {
 pub fn run(_o: &Common, port: u16) -> i32 {
     let l = match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
-        Err(e) => { eprintln!("cratebank serve: {e}"); return 1 }
+        Err(e) => {
+            eprintln!("cratebank serve: {e}");
+            return 1;
+        }
     };
     eprintln!("cratebank: echo collector on http://127.0.0.1:{port}/ingest");
     for stream in l.incoming() {
@@ -49,11 +54,16 @@ pub fn run(_o: &Common, port: u16) -> i32 {
         let buf = read_request(&mut s);
         let txt = String::from_utf8_lossy(&buf).to_string();
         let head_len = find_header_end(&buf).unwrap_or(0);
-        let compressed = txt[..head_len.min(txt.len())].to_lowercase().contains("content-encoding: br");
+        let compressed = txt[..head_len.min(txt.len())]
+            .to_lowercase()
+            .contains("content-encoding: br");
         let body = if compressed {
             crate::ship::decompress(&buf[head_len..]).unwrap_or_default()
         } else {
-            txt.splitn(2, "\r\n\r\n").nth(1).unwrap_or("").to_string()
+            txt.split_once("\r\n\r\n")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .to_string()
         };
         match serde_json::from_str::<Value>(&body) {
             Ok(v) => eprintln!("[ingest]{} run {} · {} events · {} units ({} withheld) · {} sections · {} · rustc {}",
@@ -64,8 +74,9 @@ pub fn run(_o: &Common, port: u16) -> i32 {
                 v["env"]["rustc_version"].as_str().unwrap_or("?")),
             Err(e) => eprintln!("[ingest] {} bytes, not json ({e})", body.len()),
         }
-        let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nok");
+        let _ = s.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nok",
+        );
     }
     0
 }
-

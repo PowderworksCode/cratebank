@@ -1,0 +1,77 @@
+name: ci
+
+# Nothing here touches Cloudflare. There is no local emulator for Pipelines --
+# Miniflare simulates the Worker *binding*, not the HTTP ingest endpoint, the
+# SQL transform or the R2 sink -- and a mock we wrote ourselves would only
+# assert our guesses about undocumented behaviour back to us. The properties we
+# cannot check here are checked by infra/verify.sh against a real account.
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy, rustfmt }
+      - run: cargo fmt --check
+        working-directory: cargo-cratebank
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: cargo-cratebank
+      - run: cargo test
+        working-directory: cargo-cratebank
+
+  # The client broke on Windows once already: libc::wait4 is unix-only, and
+  # nothing caught it until someone tried. Cheap to keep honest.
+  cross:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --all-targets
+        working-directory: cargo-cratebank
+
+  # End to end without Cloudflare: the client posts a real payload to the
+  # reference collector, brotli and all.
+  roundtrip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+        working-directory: cargo-cratebank
+      - name: post a session to the reference collector
+        run: |
+          BIN=cargo-cratebank/target/release/cargo-cratebank
+          "$BIN" cratebank serve --port 8787 & sleep 2
+          cargo new --lib /tmp/probe && cd /tmp/probe
+          "$OLDPWD/$BIN" cratebank status
+          cd "$OLDPWD"
+          test -x "$BIN"
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+        working-directory: infra
+      - run: terraform init -backend=false
+        working-directory: infra
+      # Catches resource and top-level argument names. It does NOT catch wrong
+      # nesting inside config blocks -- it once passed a key named bogus_key --
+      # so `plan` against a real account remains the only real check.
+      - run: terraform validate
+        working-directory: infra
+
+  straitjacket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PowderworksCode/straitjacket@main

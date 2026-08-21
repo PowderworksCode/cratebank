@@ -9,7 +9,11 @@ pub fn workspace_root(from: &std::path::Path) -> PathBuf {
     while let Some(d) = cur {
         let f = d.join("Cargo.toml");
         if let Ok(txt) = std::fs::read_to_string(&f) {
-            if txt.parse::<toml::Value>().map(|v| v.get("workspace").is_some()).unwrap_or(false) {
+            if txt
+                .parse::<toml::Value>()
+                .map(|v| v.get("workspace").is_some())
+                .unwrap_or(false)
+            {
                 best = d.clone();
             }
         }
@@ -28,12 +32,18 @@ pub fn opted_in(manifest_dir: &std::path::Path) -> bool {
         if let Ok(txt) = std::fs::read_to_string(&f) {
             if let Ok(v) = txt.parse::<toml::Value>() {
                 for path in [["package", "metadata"], ["workspace", "metadata"]] {
-                    let share = v.get(path[0]).and_then(|x| x.get(path[1]))
-                                 .and_then(|x| x.get("cratebank"))
-                                 .and_then(|x| x.get("share"))
-                                 .and_then(|x| x.as_bool());
-                    if share == Some(true) { return true; }
-                    if share == Some(false) { return false; }
+                    let share = v
+                        .get(path[0])
+                        .and_then(|x| x.get(path[1]))
+                        .and_then(|x| x.get("cratebank"))
+                        .and_then(|x| x.get("share"))
+                        .and_then(|x| x.as_bool());
+                    if share == Some(true) {
+                        return true;
+                    }
+                    if share == Some(false) {
+                        return false;
+                    }
                 }
             }
         }
@@ -62,9 +72,13 @@ pub fn ancestor_cargo() -> Option<u32> {
         let mut it = stat[close + 1..].split_whitespace();
         let _state = it.next()?;
         let ppid: u32 = it.next()?.parse().ok()?;
-        if ppid <= 1 { return None; }
+        if ppid <= 1 {
+            return None;
+        }
         let comm = std::fs::read_to_string(format!("/proc/{ppid}/comm")).unwrap_or_default();
-        if comm.trim() == "cargo" { return Some(ppid); }
+        if comm.trim() == "cargo" {
+            return Some(ppid);
+        }
         pid = ppid;
     }
     None
@@ -90,7 +104,9 @@ pub fn wait_quiet(path: &PathBuf, quiet_ms: u64, max_ms: u64) -> bool {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if size == last && size > 0 {
             still += 250;
-            if still >= quiet_ms { return true; }
+            if still >= quiet_ms {
+                return true;
+            }
         } else {
             still = 0;
             last = size;
@@ -100,4 +116,3 @@ pub fn wait_quiet(path: &PathBuf, quiet_ms: u64, max_ms: u64) -> bool {
     }
     false
 }
-

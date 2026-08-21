@@ -48,28 +48,39 @@ pub fn compress(bytes: &[u8]) -> Option<Vec<u8>> {
 pub fn decompress(bytes: &[u8]) -> Option<String> {
     use std::io::Read;
     let mut out = String::new();
-    brotli::Decompressor::new(bytes, 4096).read_to_string(&mut out).ok()?;
+    brotli::Decompressor::new(bytes, 4096)
+        .read_to_string(&mut out)
+        .ok()?;
     Some(out)
 }
 
 /// Compressed and uncompressed size of a payload, for reporting.
 pub fn sizes(body: &Value) -> (usize, usize) {
     let raw = body.to_string();
-    let n = compress(raw.as_bytes()).map(|g| g.len()).unwrap_or(raw.len());
+    let n = compress(raw.as_bytes())
+        .map(|g| g.len())
+        .unwrap_or(raw.len());
     (raw.len(), n)
 }
 
-pub fn state_file() -> PathBuf { cargo_home().join("cratebank").join("sent.txt") }
+pub fn state_file() -> PathBuf {
+    cargo_home().join("cratebank").join("sent.txt")
+}
 
 pub fn already_sent(run_id: &str) -> bool {
-    std::fs::read_to_string(state_file()).map(|s| s.lines().any(|l| l == run_id)).unwrap_or(false)
+    std::fs::read_to_string(state_file())
+        .map(|s| s.lines().any(|l| l == run_id))
+        .unwrap_or(false)
 }
 
 pub fn mark_sent(run_id: &str) {
     let p = state_file();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         let _ = writeln!(f, "{run_id}");
     }
 }
-

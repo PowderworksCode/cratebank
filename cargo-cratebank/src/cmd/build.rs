@@ -11,21 +11,37 @@ pub fn run(o: &Common, args: &[String]) -> i32 {
     c.arg("build")
         .arg("-Zbuild-analysis")
         .arg("-Zsection-timings")
-        .arg("--config").arg("build.analysis.enabled=true")
+        .arg("--config")
+        .arg("build.analysis.enabled=true")
         .args(args);
-    eprintln!("cratebank: cargo build -Zbuild-analysis -Zsection-timings {}", args.join(" "));
+    eprintln!(
+        "cratebank: cargo build -Zbuild-analysis -Zsection-timings {}",
+        args.join(" ")
+    );
     let sampler = crate::load::Sampler::start();
     let st = c.status();
     let load = sampler.finish();
     match st {
-        Ok(s) if !s.success() => { eprintln!("cratebank: build failed; sending nothing"); return 1 }
-        Err(e) => { eprintln!("cratebank: cannot run cargo: {e}"); return 1 }
+        Ok(s) if !s.success() => {
+            eprintln!("cratebank: build failed; sending nothing");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("cratebank: cannot run cargo: {e}");
+            return 1;
+        }
         _ => {}
     }
     if sessions().len() == before {
         eprintln!("cratebank: no new session log appeared — is this a nightly toolchain?");
         return 1;
     }
-    crate::cmd::send::run_with_load(o, &SendArgs { since: 1, ..Default::default() }, load)
+    crate::cmd::send::run_with_load(
+        o,
+        &SendArgs {
+            since: 1,
+            ..Default::default()
+        },
+        load,
+    )
 }
-
