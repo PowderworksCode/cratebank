@@ -32,11 +32,11 @@ Content-Type: application/json
 [ {...}, {...} ]          # a JSON array of rows, not a single object
 ```
 
-Authentication is **optional per stream**, which is what makes a public census
-possible: a contributor needs no account, no token, no signup. (Pipelines' own
-auth uses a Cloudflare API token scoped `Workers Pipeline Send` — an
-account-level credential that could not be shipped inside a public binary
-anyway.)
+Authentication is **optional per stream**, and v1 runs with it off: a
+contributor needs no account, no token, no signup. (Pipelines' own auth uses a
+Cloudflare API token scoped `Workers Pipeline Send` — an account-level
+credential that could not be shipped inside a public binary anyway, which is why
+the eventual answer is a Worker rather than stream auth.)
 
 ## Authentication
 
@@ -95,25 +95,39 @@ client only gains a token header.
 Registration — how a contributor gets that token in one command, without an
 account or an email — is specified in [`registration.md`](registration.md).
 
-### Recommendation
+### Decision: start authless
 
-Ship both, for different contributors:
+**v1 ships with no authentication.** A public Pipelines stream, a WAF rate limit,
+and data flowing this week. The reasons are practical rather than principled:
+nothing downstream exists yet, so there is nothing to protect; the credential
+design above is only worth building once the shape of the data has settled; and
+an ingest that works end to end is the fastest way to find out whether any of
+this is right.
 
-- **Access service tokens** immediately, for named organisations. Zero code, and
-  it is the credential an enterprise contributor will expect to be able to
-  rotate and audit.
-- **A Worker with stateless HMAC tokens** as the general path, self-serve so the
-  long tail is not gated on us answering email.
+What that costs, stated plainly:
 
-And tag every row with how it arrived — `trust: service | token | anonymous` —
-so an analysis can weight or exclude by provenance rather than trusting all
-submissions equally. If an anonymous tier is ever opened, that tag is what keeps
-it from contaminating everything else.
+- **submission counts are not trustworthy.** Any statistic weighted by number of
+  submissions is manipulable. Estimates must be per-class and robust — medians
+  and trimmed means over distinct compilation classes, never sums over rows;
+- **attribution is a claim, not a fact.** The `machine_id` in a payload is
+  self-declared, so "these builds are Acme's" is only as good as nobody having a
+  reason to lie yet;
+- **a bad contributor is a filter predicate, not an incident** — every row
+  carries its machine profile and client version — but we cannot revoke anyone,
+  only exclude after the fact.
 
-The cost is honest: it is no longer a no-code ingest. The no-code path remains
-available and is the right way to *start* — a public stream, a WAF rate limit,
-and real data flowing this week — with the Worker added before the endpoint is
-advertised anywhere public.
+Two things make this reversible rather than a trap:
+
+1. **Every row is tagged with how it arrived** (`trust: anonymous` today) from
+   the first row stored. Adding tiers later is then a filter, not a migration,
+   and the pre-auth data does not have to be thrown away or silently mixed in.
+2. **The endpoint is not advertised** until auth exists. Authless is fine while
+   contributors are people we asked directly; it stops being fine the moment a
+   README says "run this and share your builds".
+
+When it is time, the path is already designed:
+[`registration.md`](registration.md) for self-serve keys, and Access service
+tokens for organisations that want a credential they can rotate and audit.
 
 ## Two streams, because rows should be rows
 

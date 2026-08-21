@@ -1,5 +1,10 @@
 # Registration and contributor identity
 
+> **Not built yet.** v1 ingest is authless — see the decision in
+> [`ingest.md`](ingest.md). This is the design to reach for when the endpoint is
+> ready to be advertised publicly, which is the point at which authless stops
+> being reasonable.
+
 The goal is a credential you can get in one command, with no account, no email
 and no waiting:
 
