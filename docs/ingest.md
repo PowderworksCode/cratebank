@@ -92,6 +92,9 @@ That reverses the client work this document originally called for: with a Worker
 points 1–3 of *What has to change in the client* become the Worker's job, and the
 client only gains a token header.
 
+Registration — how a contributor gets that token in one command, without an
+account or an email — is specified in [`registration.md`](registration.md).
+
 ### Recommendation
 
 Ship both, for different contributors:
