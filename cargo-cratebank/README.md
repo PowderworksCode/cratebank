@@ -319,19 +319,33 @@ null instead.
 
 ## Compression
 
-Submissions are brotli-compressed at quality 11 — **10.6x** on real sessions,
-25 KB down to 2.4 KB, and 16% better than gzip. The `brotli` crate is pure Rust,
-so there is no C toolchain to find on any platform, and the slowest quality
-setting costs milliseconds on a payload this size.
+Submissions are zstd-compressed at level 19, and the compressed bytes are what
+gets stored — the ingest Worker writes the body to R2 without decoding it. So
+the codec is not a transport detail; it is the on-disk format, and it decides
+whether the data is queryable.
+
+**zstd because DuckDB reads it natively.** `read_json_auto()` decompresses
+zstd (and gzip) transparently, so an uploaded session is queryable the moment it
+lands, with no conversion step. brotli compresses better and was the original
+choice, but DuckDB cannot read it at all — a brotli blob in R2 is opaque until
+something rewrites it.
 
 ```
-sent …: 91 events, 43 units (11 withheld), 2 KB brotli from 25 KB -> …
+sent …: 91 events, 43 units (11 withheld), 2 KB zstd from 25 KB -> …
 ```
+
+The `zstd` crate binds C, unlike the pure-Rust brotli crate it replaced. That is
+only acceptable because `ring` — via `ureq` → `rustls` for TLS — already
+requires a C toolchain to build this crate at all, so it adds no new
+requirement. It would become one if the TLS stack were ever swapped for a
+pure-Rust provider: there is no pure-Rust zstd *encoder*.
 
 No negotiation and no fallback. A send that fails is simply not recorded as
 sent, so the session stays queued and goes out next time — a failed upload
 costs a retry, not a contribution. `cargo cratebank serve` decompresses too, so
-the reference collector behaves like a real one.
+the reference collector behaves like a real one — it sniffs the zstd magic
+number rather than trusting a header, since the header says nothing about
+whether the stored bytes will be readable.
 
 ## Payload
 

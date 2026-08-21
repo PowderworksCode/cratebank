@@ -148,12 +148,19 @@ verbatim under a versioned envelope rather than being normalised client-side.
 Early. The design docs and the client exist and are tested end to end against a
 local collector; the client is not yet published to crates.io.
 
-**Ingest and storage are designed** ([`docs/ingest.md`](docs/ingest.md)):
-Cloudflare Pipelines takes JSON over HTTP, transforms it with SQL, and writes
-date-partitioned zstd parquet to R2 — no server code on our side, and an
-endpoint that needs no account to contribute to. R2's zero egress is what makes
-`SELECT … FROM 'https://data.cratebank.io/units/**/*.parquet'` a public
-interface rather than a bill.
+**Ingest and storage are built and deployed** ([`docs/ingest.md`](docs/ingest.md)):
+a ~60-line Cloudflare Worker takes a zstd-compressed session and puts it in R2
+without decoding it, at an endpoint that needs no account to contribute to. The
+bytes the client compresses are the bytes stored are the bytes queried.
 
-Not yet built: the pipelines themselves, and batching in the client for builds
-that exceed the 5 MB request limit.
+A nightly Worker compacts those blobs into two flat parquet tables, so the
+census is one line and no credentials:
+
+```sql
+SELECT * FROM 'https://data.cratebank.io/units.parquet';
+```
+
+R2's zero egress is what makes that a public interface rather than a bill.
+
+Live at `https://ingest.cratebank.io/v1/sessions`; the stack is Terraform in
+`infra/`.

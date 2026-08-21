@@ -1,10 +1,10 @@
 name: ci
 
-# Nothing here touches Cloudflare. There is no local emulator for Pipelines --
-# Miniflare simulates the Worker *binding*, not the HTTP ingest endpoint, the
-# SQL transform or the R2 sink -- and a mock we wrote ourselves would only
-# assert our guesses about undocumented behaviour back to us. The properties we
-# cannot check here are checked by infra/verify.sh against a real account.
+# Nothing here touches Cloudflare. The ingest Worker can be exercised locally
+# with `wrangler dev --local`, which gives a simulated R2 binding, so the whole
+# put-a-blob path is testable offline -- but that is a developer step, not a CI
+# one, and the properties that depend on a real account (DNS, custom domain,
+# plan limits) are checked by deploying.
 
 on:
   push: { branches: [main] }
@@ -69,6 +69,27 @@ jobs:
       # so `plan` against a real account remains the only real check.
       - run: terraform validate
         working-directory: infra
+      # The Worker is the ingest path now; check it parses.
+      - run: node --check worker/ingest.js
+        working-directory: infra
+
+  # worker/dist/compact.js is committed so `tofu apply` works without a node
+  # toolchain. That only stays honest if the bundle matches its source, so
+  # rebuild it and fail on any drift -- otherwise a fix to compact.js could sit
+  # in the repo for weeks while the deployed Worker runs the old bytes.
+  worker-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+        working-directory: infra/worker
+      - run: npm run build
+        working-directory: infra/worker
+      - name: bundle is up to date with its source
+        run: git diff --exit-code -- dist/compact.js
+        working-directory: infra/worker
 
   straitjacket:
     runs-on: ubuntu-latest
