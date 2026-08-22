@@ -1,20 +1,18 @@
 name: ci
 
-# Most jobs here are credential-free. Same-repository pull requests additionally
-# enter the restricted preview environment for a static preview and speculative
-# OpenTofu plan; forks never enter that environment.
+# This workflow is deliberately credential-free. Privileged previews and real
+# remote-state plans live in preview.yml, whose approval gate is loaded from
+# the default branch rather than from pull-request code.
 
 on:
   push: { branches: [main] }
   pull_request:
-    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
 
 jobs:
   client:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +29,6 @@ jobs:
   # The client broke on Windows once already: libc::wait4 is unix-only, and
   # nothing caught it until someone tried. Cheap to keep honest.
   cross:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -45,7 +42,6 @@ jobs:
   # End to end without Cloudflare: the client posts a real payload to the
   # reference collector, brotli and all.
   roundtrip:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +58,6 @@ jobs:
           test -x "$BIN"
 
   terraform:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +82,6 @@ jobs:
   # The site is rendered into an ignored static-assets directory and checked
   # as build output rather than committed.
   worker-bundle:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,7 +104,6 @@ jobs:
   # every build script dies with SIGABRT. That is why the client treats a
   # failed sampler as a loud warning and re-runs the build plainly.
   sampling:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -142,224 +135,7 @@ jobs:
           EOF
 
   straitjacket:
-    if: github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: PowderworksCode/straitjacket@main
-
-  # Same-repository PRs get a disposable Workers Static Assets deployment and
-  # a speculative plan against the real remote state. Forks never enter the
-  # credentials-bearing environment, and no binary plan is persisted because
-  # it may contain sensitive values even when terminal output is redacted.
-  preview-plan:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.action != 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    concurrency:
-      group: cratebank-preview-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    environment:
-      name: preview
-      url: ${{ steps.preview.outputs.url }}
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      TF_IN_AUTOMATION: "true"
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      TF_VAR_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      TF_VAR_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
-      TF_VAR_compact_secret: ${{ secrets.COMPACT_SECRET }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_ACCESS_KEY }}
-      AWS_ENDPOINT_URL_S3: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      PREVIEW_NAME: cratebank-site-pr-${{ github.event.pull_request.number }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check preview configuration
-        run: |
-          test -n "$CLOUDFLARE_API_TOKEN"
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          test -n "$TF_VAR_zone_id"
-          test -n "$TF_VAR_compact_secret"
-          test -n "$AWS_ACCESS_KEY_ID"
-          test -n "$AWS_SECRET_ACCESS_KEY"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: infra/worker/package-lock.json
-
-      - name: Build Workers and site
-        run: npm ci && npm run build
-        working-directory: infra/worker
-
-      - name: Deploy static preview
-        id: preview
-        working-directory: infra/worker
-        env:
-          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
-          WRANGLER_SEND_METRICS: "false"
-        run: |
-          npx wrangler deploy \
-            --config wrangler-site-preview.jsonc \
-            --name "$PREVIEW_NAME"
-          preview_url="$(
-            jq -r 'select(.type == "deploy") | .targets[]? | select(startswith("https://"))' \
-              "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1
-          )"
-          test -n "$preview_url"
-          echo "url=$preview_url" >> "$GITHUB_OUTPUT"
-
-      - uses: opentofu/setup-opentofu@v2
-        with:
-          tofu_version_file: .opentofu-version
-          tofu_wrapper: false
-
-      - name: Initialize remote state
-        run: tofu init -input=false -backend-config="bucket=cratebank-tofu-state"
-        working-directory: infra
-
-      - name: Make speculative plan
-        id: plan
-        working-directory: infra
-        run: |
-          set +e
-          tofu plan -input=false -no-color -detailed-exitcode \
-            > "${RUNNER_TEMP}/tofu-plan.txt" 2>&1
-          exitcode="$?"
-          set -e
-          cat "${RUNNER_TEMP}/tofu-plan.txt"
-          echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
-
-      - name: Publish preview and plan
-        if: always()
-        uses: actions/github-script@v7
-        env:
-          PREVIEW_URL: ${{ steps.preview.outputs.url }}
-          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
-          PLAN_PATH: ${{ runner.temp }}/tofu-plan.txt
-        with:
-          script: |
-            const fs = require('fs');
-            const marker = '<!-- cratebank-preview-plan -->';
-            const preview = process.env.PREVIEW_URL || 'Preview deployment did not complete.';
-            const exitcode = process.env.PLAN_EXITCODE;
-            const planStatus = exitcode === '0'
-              ? 'No infrastructure changes.'
-              : exitcode === '2'
-                ? 'Infrastructure changes are proposed.'
-                : 'The infrastructure plan failed or did not complete.';
-            let plan = fs.existsSync(process.env.PLAN_PATH)
-              ? fs.readFileSync(process.env.PLAN_PATH, 'utf8')
-              : 'No plan output was produced.';
-            if (plan.length > 50000) {
-              plan = `${plan.slice(0, 50000)}\n\n…output truncated; see the Actions log for the rest.`;
-            }
-            const previewLine = preview.startsWith('https://')
-              ? `[Open the static preview](${preview})`
-              : preview;
-            const body = `${marker}
-            ## cratebank preview
-
-            ${previewLine}
-
-            ## OpenTofu plan
-
-            ${planStatus}
-
-            <details><summary>Plan output</summary>
-
-            \`\`\`hcl
-            ${plan}
-            \`\`\`
-
-            </details>`;
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number, per_page: 100
-            });
-            const existing = comments.find(comment =>
-              comment.user?.login === 'github-actions[bot]' &&
-              comment.body?.startsWith(marker)
-            );
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo, comment_id: existing.id, body
-              });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-            await core.summary
-              .addHeading('cratebank preview')
-              .addLink('Open the static preview', preview.startsWith('https://') ? preview : '#')
-              .addHeading('OpenTofu plan')
-              .addRaw(planStatus)
-              .addCodeBlock(plan, 'hcl')
-              .write();
-
-      - name: Fail if planning failed
-        if: steps.plan.outputs.exitcode == '1'
-        run: exit 1
-
-  cleanup-preview:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.action == 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    environment: preview
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      PREVIEW_NAME: cratebank-site-pr-${{ github.event.pull_request.number }}
-    steps:
-      - name: Delete static preview
-        run: |
-          status="$(curl --silent --show-error \
-            --output "${RUNNER_TEMP}/delete-preview.json" \
-            --write-out '%{http_code}' \
-            --request DELETE \
-            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${PREVIEW_NAME}")"
-          if [ "$status" = "200" ] || [ "$status" = "404" ]; then
-            echo "Preview ${PREVIEW_NAME} is gone (HTTP ${status})."
-          else
-            cat "${RUNNER_TEMP}/delete-preview.json"
-            exit 1
-          fi
-
-      - name: Mark preview as removed
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const marker = '<!-- cratebank-preview-plan -->';
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number, per_page: 100
-            });
-            const existing = comments.find(comment =>
-              comment.user?.login === 'github-actions[bot]' &&
-              comment.body?.startsWith(marker)
-            );
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner,
-                repo,
-                comment_id: existing.id,
-                body: `${marker}\n## cratebank preview\n\nPreview removed because this pull request is closed.`
-              });
-            }

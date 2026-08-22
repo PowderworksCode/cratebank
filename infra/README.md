@@ -12,16 +12,20 @@ the page as Workers Static Assets, makes an OpenTofu plan, and applies that
 exact saved plan. The `production` environment and workflow concurrency provide
 the approval and serialization boundaries.
 
-Every same-repository pull request also uses the `preview` environment to:
+Approved pull requests also use the `preview` environment to:
 
 - deploy the rendered page to a disposable `cratebank-site-pr-<number>`
   workers.dev URL;
 - make a speculative OpenTofu plan against the private R2 state; and
 - maintain one PR comment containing the preview link and redacted plan output.
 
-Closing or merging the PR deletes its preview Worker. Fork pull requests still
-run the credential-free checks, but the preview/plan and cleanup jobs are
-skipped before the environment is entered. No binary PR plan is retained: plan
+PRs authored by `zmaril` run automatically. For every other author, `zmaril`
+must use the exact `/preview <full-head-sha>` command that the bot posts; that
+binds approval to one revision, so a later push needs another approval. The
+privileged workflow is loaded from `main` with `pull_request_target` or
+`issue_comment`, which prevents PR code from weakening its own gate. It also
+checks the approved SHA is still current before executing PR code. Closing or
+merging the PR deletes its preview Worker. No binary PR plan is retained: plan
 files can contain cleartext secrets even when the CLI output hides them.
 
 Create a private R2 bucket named `cratebank-tofu-state`. Do not add a custom
@@ -41,9 +45,9 @@ Configure a GitHub environment named `production` with:
 | secret | `TOFU_STATE_SECRET_ACCESS_KEY` | matching R2 secret key |
 
 Create a second environment named `preview` with the same variables and
-secrets. Restrict it to the branch pattern `refs/pull/*/merge`; the workflow's
-same-repository check is the second boundary that excludes forks. Production
-remains restricted to `main`.
+secrets. Restrict it to `main`: the trusted approval workflow itself runs from
+the default branch and explicitly checks out only the approved PR merge.
+Production also remains restricted to `main`.
 
 Before merging the workflow, migrate the existing local state once from the
 checkout that currently owns it:
