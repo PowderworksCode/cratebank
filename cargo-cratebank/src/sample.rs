@@ -231,6 +231,30 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
+/// Leaf frames that mean "this thread is parked", not "this thread is working".
+///
+/// A thread waiting on a condition variable burns no CPU, so counting its
+/// samples as phase work inflates whatever bucket they land in. On one build
+/// 448 samples across `coordinator`, `ctrl-c` and unnamed threads were ~99%
+/// parked in these -- 1.2% of the total, and worse the more parallel the
+/// build. Reported as its own bucket rather than dropped: "this unit spent 40%
+/// of its wall clock waiting" is real information, it just is not compile time.
+const BLOCKING: &[&str] = &[
+    "semaphore_wait_trap",
+    "__psynch_cvwait",
+    "__ulock_wait",
+    "kevent",
+    "__wait4",
+    "mach_msg2_trap",
+    "poll",
+    "epoll_wait",
+    "futex_wait",
+];
+
+fn is_blocked(sym: &str) -> bool {
+    BLOCKING.iter().any(|b| sym == *b || sym.ends_with(b))
+}
+
 fn phase_of(sym: &str) -> Option<&'static str> {
     MARKERS
         .iter()
@@ -300,10 +324,18 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
         let Some(unit) = t["processName"].as_str().and_then(unit_of) else {
             continue;
         };
-        // rustc names its codegen threads `opt cgu.NN`.
+        // rustc names its codegen threads `opt cgu.NN`, and the thread that
+        // hands them work `coordinator`. The coordinator is codegen
+        // infrastructure, not frontend work; classifying it as serial put
+        // codegen's scheduling cost into the frontend's column.
+        //
+        // Note this is by thread *name*, never `isMainThread`. rustc parks its
+        // process main thread and does the work on a spawned thread called
+        // `rustc`, so a main-thread test would attribute a whole compile to
+        // roughly a dozen samples.
         let is_cgu = t["name"]
             .as_str()
-            .map(|n| n.starts_with("opt cgu") || n.starts_with("codegen cgu"))
+            .map(|n| n.starts_with("opt cgu") || n.starts_with("codegen cgu") || n == "coordinator")
             .unwrap_or(false);
 
         let ft = &t["frameTable"];
@@ -361,11 +393,19 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
                     None => break,
                 }
             }
-            let hit = chain
-                .iter()
-                .rev()
-                .find_map(|n| phase_of(n))
-                .unwrap_or("unattributed");
+            // `chain` is leaf-first. A leaf in a blocking syscall means the
+            // thread was parked, so this sample is not compile work at all --
+            // decided before any phase marker is consulted, because the
+            // enclosing frames still look like whatever phase was waiting.
+            let hit = if chain.first().is_some_and(|n| is_blocked(n)) {
+                "blocked"
+            } else {
+                chain
+                    .iter()
+                    .rev()
+                    .find_map(|n| phase_of(n))
+                    .unwrap_or("unattributed")
+            };
             let bucket = if is_cgu {
                 &mut e.parallel
             } else {
@@ -431,6 +471,19 @@ mod tests {
         // file's parent directory would call every one of them `src`
         let lib = unit_of("rustc --crate-name serde /home/u/.cargo/registry/src/index.crates.io-1/serde-1.0.229/src/lib.rs --crate-type lib -C 'metadata=ccc'").unwrap();
         assert_eq!(lib.package, "serde-1.0.229");
+    }
+
+    #[test]
+    fn parked_threads_are_not_compile_work() {
+        // A thread waiting on a condition variable burns no CPU. Counting it
+        // as a phase inflated whichever bucket the enclosing frames pointed
+        // at -- and the enclosing frames still look like the phase that is
+        // waiting, so this must be decided on the leaf.
+        assert!(is_blocked("semaphore_wait_trap"));
+        assert!(is_blocked("__psynch_cvwait"));
+        assert!(is_blocked("__ulock_wait"));
+        assert!(!is_blocked("rustc_borrowck::mir_borrowck"));
+        assert!(!is_blocked("llvm::runPasses"));
     }
 
     #[test]
