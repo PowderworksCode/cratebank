@@ -24,6 +24,7 @@ mod project;
 mod sample;
 mod session;
 mod ship;
+mod timings;
 
 use cli::{Cli, Cmd};
 

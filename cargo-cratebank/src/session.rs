@@ -296,6 +296,15 @@ pub fn payload(s: &mut Session, build_env: Value, load: Value, phases: Value) ->
         .as_ref()
         .map(|d| crate::artifacts::report(d, &s.public_crates))
         .unwrap_or(Value::Null);
+    // Same target dir as the artifacts, for the same reason: cargo already
+    // wrote the file, we only read it. Null unless the build passed
+    // `--timings`, which `cratebank build` does and a bare `cargo build` does
+    // not -- so a session shipped after the fact simply carries none.
+    let timings = s
+        .target_dir
+        .as_ref()
+        .map(|d| crate::timings::capture(d, &header))
+        .unwrap_or(Value::Null);
     let machine_json = crate::machine::snapshot(Some(&s.dir));
     let events = std::mem::take(&mut s.events);
     let withheld = s.withheld;
@@ -308,6 +317,7 @@ pub fn payload(s: &mut Session, build_env: Value, load: Value, phases: Value) ->
         load,
         artifacts,
         phases,
+        timings,
         machine_json,
     )
 }
@@ -322,6 +332,7 @@ fn payload_inner(
     load: Value,
     artifacts: Value,
     phases: Value,
+    timings: Value,
     machine_json: Value,
 ) -> Value {
     let get = |k: &str| header.get(k).cloned().unwrap_or(Value::Null);
@@ -357,6 +368,12 @@ fn payload_inner(
         // Per-unit compiler phases, sampled. Null when the build was not
         // sampled -- an analysis must never read absence as zero.
         "phases": phases,
+        // cargo's own view of the build. Mostly duplicates the event stream
+        // above; `concurrency_data` does not exist anywhere else, and being
+        // stable it is the substitute for the nightly session log if stable
+        // collection is ever wanted. Same single source as the events, so the
+        // two agreeing is not corroboration.
+        "timings": timings,
         "build_env": build_env,
         // A session log has no build-finished event, so a build that failed
         // half way looks exactly like one that completed. Every registered

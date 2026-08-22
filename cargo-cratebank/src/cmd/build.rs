@@ -33,6 +33,11 @@ fn cargo_args(args: &[String]) -> Vec<String> {
         "build".into(),
         "-Zbuild-analysis".into(),
         "-Zsection-timings".into(),
+        // cargo's own report. Mostly duplicates the session log, but
+        // CONCURRENCY_DATA -- how many units were ready-but-blocked versus
+        // running -- exists nowhere else, and unlike the session log it is
+        // stable, so it is what a stable-only tier would read instead.
+        "--timings".into(),
         "--config".into(),
         "build.analysis.enabled=true".into(),
     ];
