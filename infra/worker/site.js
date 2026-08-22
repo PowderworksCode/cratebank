@@ -10,19 +10,28 @@ const SITE = `<!doctype html>
 <title>cratebank — a census of Rust build times</title>
 <meta name="description" content="Share the Rust build timings you were already producing. An opt-in, public census of where compile time actually goes.">
 <style>
-  :root { color-scheme: light dark; --fg:#111; --dim:#555; --bg:#fdfdfc; --line:#e3e3e0; --code:#f4f4f1; --accent:#a4432b; }
+  /* The tokens. Every literal colour and font in the page is defined here and
+     referenced as a variable below, so a change lands in one place. The two
+     palette lines are the only ones that ask straitjacket for an exemption:
+     a token definition is where the literal is supposed to be, and the marker
+     is scoped to that line so a stray colour further down still fails. */
+  :root {
+    --font-body: ui-serif, Georgia, "Times New Roman", serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  :root { color-scheme: light dark; --fg:#111; --dim:#555; --bg:#fdfdfc; --line:#e3e3e0; --code:#f4f4f1; --accent:#a4432b; } /* straitjacket-allow:color */
   @media (prefers-color-scheme: dark) {
-    :root { --fg:#e8e8e6; --dim:#a0a09b; --bg:#16161a; --line:#2c2c31; --code:#1e1e23; --accent:#e08a68; }
+    :root { --fg:#e8e8e6; --dim:#a0a09b; --bg:#16161a; --line:#2c2c31; --code:#1e1e23; --accent:#e08a68; } /* straitjacket-allow:color */
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
-         font:16px/1.65 ui-serif,Georgia,"Times New Roman",serif; }
+         font:16px/1.65 var(--font-body); }
   main { max-width:46rem; margin:0 auto; padding:3.5rem 1.25rem 5rem; }
   h1 { font-size:2rem; margin:0 0 .25rem; letter-spacing:-.02em; }
   .tag { color:var(--dim); margin:0 0 2.5rem; font-size:1.05rem; }
   h2 { font-size:1.15rem; margin:2.5rem 0 .6rem; letter-spacing:-.01em; }
   p, li { margin:.6rem 0; }
-  code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.875rem; }
+  code, pre { font-family:var(--font-mono); font-size:.875rem; }
   pre { background:var(--code); border:1px solid var(--line); border-radius:6px;
         padding:.85rem 1rem; overflow-x:auto; line-height:1.5; }
   code:not(pre code) { background:var(--code); padding:.1rem .3rem; border-radius:3px; }
