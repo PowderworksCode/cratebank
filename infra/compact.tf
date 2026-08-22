@@ -99,3 +99,58 @@ resource "cloudflare_r2_custom_domain" "data" {
   enabled     = true
   min_tls     = "1.2"
 }
+
+# ── the public face ──────────────────────────────────────────────────────────
+
+# cratebank.io and www: a single inlined page, no assets, no build step. Also
+# answers the bare root of data.cratebank.io, which is an R2 bucket and would
+# otherwise 404 at exactly the hostname people see in a query.
+resource "cloudflare_workers_script" "site" {
+  account_id  = var.account_id
+  script_name = "cratebank-site"
+
+  content     = file("${path.module}/worker/site.js")
+  main_module = "site.js"
+
+  compatibility_date = "2026-08-21"
+
+  observability = {
+    enabled            = true
+    head_sampling_rate = 1
+    logs = {
+      enabled            = true
+      head_sampling_rate = 1
+      invocation_logs    = true
+      persist            = true
+    }
+    traces = {
+      enabled            = false
+      head_sampling_rate = 1
+      persist            = true
+    }
+  }
+}
+
+# The apex and www both served the registrar's parking page before this, and
+# both were broken behind Cloudflare's proxy -- 522 and 525 respectively. The
+# MX and SPF records for email forwarding are untouched and must stay that way.
+resource "cloudflare_workers_custom_domain" "site" {
+  for_each = var.zone_id == "" ? toset([]) : toset(["cratebank.io", "www.cratebank.io"])
+
+  account_id = var.account_id
+  zone_id    = var.zone_id
+  hostname   = each.value
+  service    = cloudflare_workers_script.site.script_name
+}
+
+# data.cratebank.io is an R2 custom domain, so R2 answers every path on it --
+# including the bare root, where there is no object and a visitor gets a 404 at
+# exactly the hostname they saw in a query. A route on that one path is the
+# narrowest thing that can intercept it; everything else still goes to R2.
+resource "cloudflare_workers_route" "data_root" {
+  count = var.zone_id == "" ? 0 : 1
+
+  zone_id = var.zone_id
+  pattern = "data.${var.zone_name}/"
+  script  = cloudflare_workers_script.site.script_name
+}
