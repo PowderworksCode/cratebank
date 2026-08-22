@@ -102,20 +102,8 @@ resource "cloudflare_r2_custom_domain" "data" {
 
 # ── the public face ──────────────────────────────────────────────────────────
 
-# The landing page is deployed by GitHub as Workers Static Assets. Stop
-# managing its former request-time script without deleting the service: the
-# first static upload updates that same service in place.
-removed {
-  from = cloudflare_workers_script.site
-
-  lifecycle {
-    destroy = false
-  }
-}
-
-# The apex and www both served the registrar's parking page before this, and
-# both were broken behind Cloudflare's proxy -- 522 and 525 respectively. The
-# MX and SPF records for email forwarding are untouched and must stay that way.
+# The apex and www are Workers custom domains for the static site service. The
+# MX and SPF records for email forwarding are separate and must stay untouched.
 resource "cloudflare_workers_custom_domain" "site" {
   for_each = var.zone_id == "" ? toset([]) : toset(["cratebank.io", "www.cratebank.io"])
 

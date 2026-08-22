@@ -6,10 +6,7 @@
 // contribution and query, and nothing here can drop a row by misunderstanding
 // it. "Capture generously, model nothing at ingest", enforced by having no
 // code that could do otherwise.
-//
-// This replaced a Cloudflare Pipelines stream, which capped requests at 5 MB
-// and each message at 1 MB. A Worker's limit is the plan's request-body size
-// (100 MB on Free/Pro), which removes the need for client-side batching.
+// The request ceiling is the zone's request-body size (100 MB on Free/Pro).
 
 const PATH = "/v1/sessions";
 

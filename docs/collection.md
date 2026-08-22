@@ -39,7 +39,7 @@ are never pooled.
 scans for those artifacts, extracts per-unit data, and uploads. No wrapper, no
 build-time overhead, nothing in the compile path. Limitation: `--timings`
 reports **wall clock per unit**, not CPU, so tier-1 observations are noisier
-and carry a contention term. Fine in bulk; the crossed model absorbs it.
+and carry a contention term. The crossed model accounts for it in aggregate.
 
 **Tier 2 — sampled (opt-in, richer).** `cargo cratebank build` runs the build
 under a sampling profiler and reports, per compilation unit, how the time
@@ -47,13 +47,10 @@ divided between macro expansion, type checking, borrow checking, and codegen.
 It needs no compiler flags, so it works on stable and on any rustc version --
 `-Ztime-passes` and `-Zself-profile` give more detail but are nightly-only.
 
-A wrapper was the obvious way to do this and turned out to be the wrong one.
-`RUSTC_WRAPPER` **overrides** `build.rustc-wrapper` in a contributor's cargo
-config rather than stacking with it, so a wrapper silently displaces `sccache`
-and doubles their build. The sampler avoids the collision entirely by not
-being in the compile path: it wraps the whole `cargo build` once, and since
-every unit is its own rustc process and every sample carries a pid,
-attribution is exact without touching how anything is compiled.
+The sampler stays outside the compile path and wraps the whole `cargo build`
+once. Every unit is its own rustc process and every sample carries a pid, so
+attribution is exact without setting `RUSTC_WRAPPER` or displacing a
+contributor's configured `sccache`.
 
 Two things tier-2 data must carry, because both are easy to misread:
 - **serial and parallel samples separately.** rustc codegens on a thread per
@@ -204,8 +201,7 @@ the Rust project itself, and falls out of collection for free.
   representativeness.
 - **Tier-1 data is wall clock**, so it carries a contention term; tier-2 shim
   data is real CPU. Both are usable, but never pooled without the tier flag.
-- **A controlled run is still worth having** as a calibration anchor and for
+- **A controlled run is useful** as a calibration anchor and for
   deep instrumentation (self-profile, mono stats) that is too heavy to ask of
-  contributors. It is now optional and secondary rather than the backbone —
-  common dependencies compiled on thousands of machines are themselves a
-  strong anchor.
+  contributors. It is optional; common dependencies compiled on thousands of
+  machines are also a strong anchor.

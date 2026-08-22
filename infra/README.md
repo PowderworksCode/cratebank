@@ -1,9 +1,8 @@
 # infra
 
-The whole cratebank stack: Terraform owns the R2 data bucket, two request-time
+The whole cratebank stack: OpenTofu owns the R2 data bucket, two request-time
 Workers, domains, and the compaction cron; Wrangler uploads the static landing
-page. Merges to `main` deploy both through `.github/workflows/deploy.yml`, so a
-developer laptop is not part of the ongoing deployment path.
+page. Merges to `main` deploy the stack through `.github/workflows/deploy.yml`.
 
 ## GitHub deployment
 
@@ -28,10 +27,10 @@ checks the approved SHA is still current before executing PR code. Closing or
 merging the PR deletes its preview Worker. No binary PR plan is retained: plan
 files can contain cleartext secrets even when the CLI output hides them.
 
-Create a private R2 bucket named `cratebank-tofu-state`. Do not add a custom
-domain to it and do not reuse the public `cratebank` data bucket: OpenTofu state
-contains the manual compaction secret. Create an R2 Object Read & Write token
-scoped to this state bucket.
+OpenTofu state is stored in the private `cratebank-tofu-state` R2 bucket. The
+bucket has no custom domain and is separate from the public `cratebank` data
+bucket because state contains the manual compaction secret. Its access token is
+scoped to Object Read & Write on that bucket.
 
 Configure a GitHub environment named `production` with:
 
@@ -44,36 +43,28 @@ Configure a GitHub environment named `production` with:
 | secret | `TOFU_STATE_ACCESS_KEY_ID` | state-bucket-scoped R2 access key |
 | secret | `TOFU_STATE_SECRET_ACCESS_KEY` | matching R2 secret key |
 
-Create a second environment named `preview` with the same variables and
-secrets. Restrict it to `main`: the trusted approval workflow itself runs from
-the default branch and explicitly checks out only the approved PR merge.
-Production also remains restricted to `main`.
+The `preview` environment has the same variables and secrets. Both environments
+are restricted to `main`: the trusted preview workflow runs from the default
+branch and checks out only the approved PR revision.
 
-Before merging the workflow, migrate the existing local state once from the
-checkout that currently owns it:
+A pull request gets a static preview and a speculative plan according to the
+approval policy above. Merge to `main`, or run the `deploy` workflow manually,
+to deploy production. The production job creates and applies a fresh saved
+plan. GitHub Actions is the production state writer; do not run concurrent
+local applies.
+
+For a read-only local plan, export `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and `AWS_ENDPOINT_URL_S3`, then initialize with:
 
 ```sh
-export AWS_ACCESS_KEY_ID='<state bucket access key>'
-export AWS_SECRET_ACCESS_KEY='<state bucket secret key>'
-export AWS_ENDPOINT_URL_S3='https://<account id>.r2.cloudflarestorage.com'
-
-tofu init -migrate-state -backend-config='bucket=cratebank-tofu-state'
-tofu plan -var-file=prod.tfvars
+tofu init -backend-config='bucket=cratebank-tofu-state'
+tofu plan
 ```
 
-After that migration, a pull request gets a preview and a speculative plan.
-Deploy by merging to `main` or by running the `deploy` workflow manually. The
-production job creates and applies a fresh saved plan after merge; it never
-applies the speculative PR plan. Do not restore a local backend or run
-concurrent local applies; GitHub is the production writer. Local plans still
-work with the same three `AWS_*` variables and `-backend-config` argument.
+## OpenTofu
 
-## OpenTofu, not Terraform
-
-`required_version >= 1.6` cannot be met by Homebrew's `terraform`, which is
-frozen at 1.5.7 and marked deprecated because the next release changed to BUSL.
-Use `brew install opentofu` and run `tofu`. The config is plain HCL with nothing
-HashiCorp-specific in it, so either binary works if you have a recent one.
+Use the OpenTofu version recorded in `.opentofu-version`. On macOS, install it
+with `brew install opentofu` and run it as `tofu`.
 
 ### Cloudflare credentials
 
@@ -97,16 +88,9 @@ read sensitive Worker bindings even though GitHub masks the original secret.
 
 ## `plan` is the real check, not `validate`
 
-`tofu validate` passes against the provider schema, so resource types and
-top-level argument names are checked. It is **much weaker than it looks for
-nested blocks**:
-
-> An earlier version of this file put `time_pattern` and `interval_seconds` at
-> the top of a sink `config` instead of inside `partitioning` and
-> `rolling_policy`. `validate` said "Success!". Adding a nested key called
-> `bogus_key = "nonsense"` also passes.
-
-So run `plan` against a real account before believing any of it.
+`tofu validate` checks resource types and top-level argument names but does not
+reliably validate every provider-specific nested block. Treat the remote-state
+`plan` against the Cloudflare account as the authoritative configuration check.
 
 ## What deployment creates
 
@@ -154,9 +138,9 @@ cd worker && npm ci && npm run build
 ## The compaction Worker
 
 `worker/compact.js` reads every session blob nightly and writes
-`units.parquet` and `sessions.parquet` to the bucket root, plus dated copies
-under `snapshots/`. Those are the public interface; the raw blobs are the
-ground truth.
+`sessions.parquet`, `units.parquet`, `phases.parquet`, `timeline.parquet`, and
+`unit_flags.parquet` to the bucket root, plus dated copies under `snapshots/`.
+Those files are the public interface; the raw blobs are the ground truth.
 
 Trigger it by hand rather than waiting for 05:00 UTC:
 
@@ -170,53 +154,10 @@ not be — the ceiling is the Worker's 128 MB, roughly 10k sessions. Watch
 `objects` and `bytes_in` in the cron logs; the fix when it arrives is per-day
 compaction, which the hive key layout already supports.
 
-## Two traps, both the same shape
+## Provider drift
 
-Terraform reads a server-populated field as a field you deleted, and plans a
-change forever. Both were caught by reading a plan that claimed to modify
-something nobody had touched.
-
-**Optional+computed blocks must be declared in full.** `observability = {
-enabled = true }` looks complete, but the server fills in `head_sampling_rate`,
-`logs` and `traces`. Terraform then reads the difference as a removal and
-re-uploads the script on **every plan**. Declare every sub-field, or expect
-permanent drift.
-
-**The same bug bites harder on resources that cannot be updated in place.** The
-now-removed Pipelines stream had a server-generated schema; the config did not
-declare it, so every plan forced a *replacement*, minting a new stream id and
-endpoint each time. It needed `lifecycle { ignore_changes = [schema] }`. If a
-plan proposes replacing something you did not touch, read the diff before
-applying it.
-
-## What was here before
-
-A Cloudflare Pipelines stream, sink and pipeline, deleted once the Worker
-existed. `docs/ingest.md` records why in detail; the short version is a 1 MB
-per-message cap that appears in no documentation, and an ingest that answered
-`200 committed:N` for events it then silently discarded.
-
-Two findings worth keeping if anyone reconsiders Pipelines:
-
-- **`format.unstructured = true` is the only way to get an unstructured
-  stream.** Declaring `schema.fields = [{name="value", type="json", required=true}]`
-  instead produces a *structured* stream, and every event without a literal
-  `value` key — which is every event this client sends — is accepted and then
-  dropped before reaching R2.
-- **Deleting a stream requires destroying the pipeline first**, and Terraform
-  will not work that out if the pipeline's SQL string is unchanged. It fails
-  mid-apply with `422 Stream still in use and cannot be deleted`; force it with
-  `tofu apply -replace=cloudflare_pipeline.<name>`.
-
-## Pulumi
-
-`pulumi-cloudflare` (v6.19.0) is bridged from this same Terraform provider, so
-the resources and arguments are identical modulo naming convention:
-
-```sh
-pulumi convert --from terraform --language typescript --out ../infra-pulumi
-```
-
-That is the honest recommendation over hand-writing it — the bridge means the
-Terraform is the source of truth for what the provider accepts either way, and
-`convert` will not invent an argument the provider does not have.
+Declare Cloudflare optional-and-computed blocks in full. For example, the
+Workers `observability` block includes `head_sampling_rate`, `logs`, and
+`traces` alongside `enabled`. Omitting server-populated fields creates
+permanent plan drift and repeated script uploads. Review any unexpected
+replacement in the speculative plan before merging.

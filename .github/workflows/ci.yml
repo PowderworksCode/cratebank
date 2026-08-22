@@ -26,8 +26,7 @@ jobs:
       - run: cargo test
         working-directory: cargo-cratebank
 
-  # The client broke on Windows once already: libc::wait4 is unix-only, and
-  # nothing caught it until someone tried. Cheap to keep honest.
+  # Keep the client portable across its supported operating systems.
   cross:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -69,12 +68,11 @@ jobs:
         working-directory: infra
       - run: tofu init -backend=false
         working-directory: infra
-      # Catches resource and top-level argument names. It does NOT catch wrong
-      # nesting inside config blocks -- it once passed a key named bogus_key --
-      # so `plan` against a real account remains the only real check.
+      # Catches resource and top-level argument names. The remote plan validates
+      # provider-specific nested configuration against the real account.
       - run: tofu validate
         working-directory: infra
-      # The Worker is the ingest path now; check it parses.
+      # Check the ingest Worker source parses.
       - run: node --check worker/ingest.js
         working-directory: infra
 

@@ -160,8 +160,8 @@ function flatten(session, key) {
 
   // Sampled compiler phases, if the build was sampled. A long table rather
   // than columns: the marker set will keep changing as the phase mapping
-  // improves, and a long table absorbs that where a wide one forces a
-  // migration. `thread` separates the serial frontend from the per-CGU codegen
+  // improves, and a long table accepts new phases without changing columns.
+  // `thread` separates the serial frontend from the per-CGU codegen
   // threads -- blending them gives a number comparable to neither wall clock
   // nor CPU.
   //
@@ -378,9 +378,9 @@ async function compact(env) {
   // Stable names are the public interface; the dated copies are an audit trail,
   // so a bad run can be diagnosed against the file it actually produced.
   // The schema travels with the data. Published beside the parquet so anyone
-  // holding a copy can interpret it without this repository, and versioned so
-  // an old snapshot stays readable after the tables change. Generated from the
-  // same column lists that build the files, so it cannot drift from them.
+  // holding a copy can interpret it without this repository. Versioning keeps
+  // every snapshot tied to its schema. The schema is generated from the same
+  // column lists that build the files, so it cannot drift from them.
   const schema = {
     version: 1,
     generated: new Date().toISOString(),
