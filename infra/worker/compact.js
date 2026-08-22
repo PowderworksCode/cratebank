@@ -188,7 +188,50 @@ function flatten(session, key) {
     }
   }
 
-  return { unitRows, sessionRow, phaseRows }
+  // cargo's own build timeline. Two series that cargo samples on *different*
+  // clocks -- concurrency at 0.33s, CPU at 0.51s on the same build -- so they
+  // cannot be joined by index and a row carries one or the other, never both.
+  // Sparse columns cost almost nothing in parquet and the alternative is two
+  // tables describing the same axis.
+  //
+  // `waiting` is the reason this exists: it is cargo's count of units ready to
+  // build but blocked on a dependency, and nothing else collected can
+  // distinguish a build that is dependency-bound from one that is CPU-bound.
+  const timelineRows = []
+  for (const c of s.timings?.concurrency_data ?? []) {
+    timelineRows.push({
+      run_id: s.run_id ?? null, t: c.t ?? null,
+      active: c.active ?? null, waiting: c.waiting ?? null, inactive: c.inactive ?? null,
+      cpu_pct: null,
+    })
+  }
+  for (const [t, pct] of s.timings?.cpu_usage ?? []) {
+    timelineRows.push({
+      run_id: s.run_id ?? null, t: t ?? null,
+      active: null, waiting: null, inactive: null, cpu_pct: pct ?? null,
+    })
+  }
+
+  // Resolved compilation settings per unit, long. Long because the set is
+  // open -- rustc gains flags, cargo profiles differ -- and because most are
+  // uniform across a build while `features` is not, so columns would be mostly
+  // repetition with one exception. These decide what a measurement *means*:
+  // an opt-level 0 unit and an opt-level 3 unit are not the same specimen.
+  const flagRows = []
+  for (const pu of s.phases?.units ?? []) {
+    for (const [flag, value] of Object.entries(pu.flags ?? {})) {
+      flagRows.push({
+        run_id: s.run_id ?? null,
+        crate: pu.crate ?? null,
+        package: pu.package ?? null,
+        crate_type: pu.crate_type ?? null,
+        flag,
+        value: String(value),
+      })
+    }
+  }
+
+  return { unitRows, sessionRow, phaseRows, timelineRows, flagRows }
 }
 
 // Column builders. Two hard-won details:
@@ -235,6 +278,8 @@ async function compact(env) {
   const unitRows = []
   const sessionRows = []
   const phaseRows = []
+  const timelineRows = []
+  const flagRows = []
   let bytesIn = 0
   let failed = 0
 
@@ -246,10 +291,13 @@ async function compact(env) {
       bytesIn += raw.byteLength
       const json = new TextDecoder().decode(decompress(raw))
       const parsed = JSON.parse(json)
-      const { unitRows: u, sessionRow, phaseRows: ph } = flatten(parsed, key)
+      const { unitRows: u, sessionRow, phaseRows: ph, timelineRows: tl, flagRows: fl } =
+        flatten(parsed, key)
       unitRows.push(...u)
       sessionRows.push(sessionRow)
       phaseRows.push(...ph)
+      timelineRows.push(...tl)
+      flagRows.push(...fl)
     } catch (e) {
       // One malformed blob must not cost the whole run. Count it and move on;
       // the raw object is still there to inspect.
@@ -302,6 +350,27 @@ async function compact(env) {
       })
     : null
 
+  const timelineBuf = timelineRows.length
+    ? parquetWriteBuffer({
+        columnData: [
+          str(timelineRows, 'run_id'), dbl(timelineRows, 't'),
+          i64(timelineRows, 'active'), i64(timelineRows, 'waiting'),
+          i64(timelineRows, 'inactive'), dbl(timelineRows, 'cpu_pct'),
+        ],
+        compressed: true,
+      })
+    : null
+
+  const flagsBuf = flagRows.length
+    ? parquetWriteBuffer({
+        columnData: [
+          str(flagRows, 'run_id'), str(flagRows, 'crate'), str(flagRows, 'package'),
+          str(flagRows, 'crate_type'), str(flagRows, 'flag'), str(flagRows, 'value'),
+        ],
+        compressed: true,
+      })
+    : null
+
   const day = new Date().toISOString().slice(0, 10)
   const put = (k, b) =>
     env.BUCKET.put(k, b, { httpMetadata: { contentType: 'application/vnd.apache.parquet' } })
@@ -349,6 +418,35 @@ async function compact(env) {
           loadavg_mean: 'machine load during the build', cpu_busy_mean: 'percent',
         },
       },
+      'unit_flags.parquet': {
+        grain: 'one row per unit per compilation setting',
+        source: 'the rustc command line, from the profile',
+        caution: 'paths are deliberately absent -- every one would name the '
+          + "builder's machine. `incremental` is true/false only, for the same "
+          + 'reason, though its presence shifts every timing in the session.',
+        columns: {
+          run_id: 'joins to sessions.parquet', crate: '', package: '', crate_type: '',
+          flag: 'opt-level | debuginfo | codegen-units | panic | lto | edition | '
+            + 'target | features | incremental | ...',
+          value: 'always a string; features is comma-separated',
+        },
+      },
+      'timeline.parquet': {
+        grain: 'one row per timeline sample',
+        source: 'cargo build --timings',
+        caution: 'cargo samples concurrency and CPU on different clocks, so a '
+          + 'row carries the concurrency triple OR cpu_pct, never both. '
+          + 'Filter on the column you want being non-null.',
+        columns: {
+          run_id: 'joins to sessions.parquet',
+          t: 'seconds since build start',
+          active: 'units compiling',
+          waiting: 'units ready but blocked on a dependency -- the reason this '
+            + 'table exists; high waiting means dependency-bound, not slow',
+          inactive: 'units not yet runnable',
+          cpu_pct: 'whole-machine CPU percent',
+        },
+      },
       'phases.parquet': {
         grain: 'one row per unit per thread-class per phase',
         source: 'sampling profiler around the whole build',
@@ -381,6 +479,12 @@ async function compact(env) {
     ...(phasesBuf
       ? [put('phases.parquet', phasesBuf), put(`snapshots/phases-${day}.parquet`, phasesBuf)]
       : []),
+    ...(timelineBuf
+      ? [put('timeline.parquet', timelineBuf), put(`snapshots/timeline-${day}.parquet`, timelineBuf)]
+      : []),
+    ...(flagsBuf
+      ? [put('unit_flags.parquet', flagsBuf), put(`snapshots/unit_flags-${day}.parquet`, flagsBuf)]
+      : []),
     put('sessions.parquet', sessionsBuf),
     put(`snapshots/units-${day}.parquet`, unitsBuf),
     put(`snapshots/sessions-${day}.parquet`, sessionsBuf),
@@ -395,6 +499,8 @@ async function compact(env) {
     bytes_in: bytesIn,
     units_parquet: unitsBuf.byteLength,
     phase_rows: phaseRows.length,
+    timeline_rows: timelineRows.length,
+    flag_rows: flagRows.length,
     phases_parquet: phasesBuf ? phasesBuf.byteLength : 0,
     sessions_parquet: sessionsBuf.byteLength,
     ms: Date.now() - started,

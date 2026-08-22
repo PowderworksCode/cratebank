@@ -65,6 +65,9 @@ pub struct UnitPhases {
     /// Package this unit belongs to. Distinguishes the many build scripts,
     /// all of which are named `build_script_build`.
     pub package: String,
+    /// Resolved compilation settings: opt-level, debuginfo, codegen-units,
+    /// panic, lto, edition, target, features. Scrubbed of paths.
+    pub flags: BTreeMap<String, String>,
     /// Samples on the main thread: the serial part of compilation.
     pub serial: BTreeMap<String, u64>,
     /// Samples on per-codegen-unit threads. rustc codegens on a thread per
@@ -146,6 +149,8 @@ pub struct UnitId {
     /// Package directory for registry crates (`proc-macro2-1.0.107`), else the
     /// crate name. What a human wants when the crate name is a build script.
     pub package: String,
+    /// Resolved compilation settings, scrubbed of paths.
+    pub flags: BTreeMap<String, String>,
 }
 
 /// Unit identity from a rustc command line, or None if this process is not a
@@ -206,7 +211,78 @@ fn unit_of(process_name: &str) -> Option<UnitId> {
         crate_type: kind.unwrap_or_else(|| "lib".into()),
         metadata,
         package,
+        flags: build_flags(&argv),
     })
+}
+
+/// The compilation settings from a rustc command line, scrubbed of paths.
+///
+/// These decide what the numbers mean. An opt-level 0 unit and an opt-level 3
+/// unit are not the same specimen, and a census that cannot tell them apart is
+/// comparing unlike things -- so this is section A of the capture manifest,
+/// "resolved profile", and it was sitting unread in a profile we already
+/// collect.
+///
+/// Values that are paths are deliberately dropped rather than recorded. The
+/// command line is full of them -- `--out-dir`, `-L dependency=`, `--extern
+/// x=/…`, the source file -- and every one names the builder's machine. What
+/// survives is the *shape* of the compilation, never where it happened.
+/// `incremental` is the awkward case: its value is a path, but whether it was
+/// on changes every timing in the session, so it is reduced to a boolean.
+fn build_flags(argv: &[String]) -> BTreeMap<String, String> {
+    const KEEP_C: [&str; 11] = [
+        "opt-level",
+        "debuginfo",
+        "codegen-units",
+        "panic",
+        "overflow-checks",
+        "lto",
+        "embed-bitcode",
+        "split-debuginfo",
+        "target-cpu",
+        "target-feature",
+        "strip",
+    ];
+    let mut out = BTreeMap::new();
+    let mut features: Vec<String> = Vec::new();
+    let mut it = argv.iter().peekable();
+    while let Some(a) = it.next() {
+        // `-C key=value`, which samply may render as one token or two
+        let c = a
+            .strip_prefix("-C")
+            .map(|r| r.trim_start().to_string())
+            .filter(|r| !r.is_empty())
+            .or_else(|| (a == "-C").then(|| it.peek().map(|s| s.to_string()))?);
+        if let Some(kv) = c {
+            if let Some((k, v)) = kv.split_once('=') {
+                if KEEP_C.contains(&k) {
+                    out.insert(k.to_string(), v.to_string());
+                } else if k == "incremental" {
+                    out.insert("incremental".into(), "true".into());
+                }
+            }
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--edition=") {
+            out.insert("edition".into(), v.to_string());
+        } else if a == "--target" {
+            if let Some(v) = it.peek() {
+                out.insert("target".into(), v.to_string());
+            }
+        } else if let Some(v) = a.strip_prefix("--target=") {
+            out.insert("target".into(), v.to_string());
+        } else if let Some(v) = a.strip_prefix("feature=") {
+            // from `--cfg feature="serde"`; quotes already stripped by the
+            // splitter, which is why this matches the bare form
+            features.push(v.trim_matches('"').to_string());
+        }
+    }
+    if !features.is_empty() {
+        features.sort();
+        features.dedup();
+        out.insert("features".into(), features.join(","));
+    }
+    out
 }
 
 /// Shell-ish split honouring the single quotes samply writes around arguments.
@@ -349,6 +425,7 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
             crate_name: unit.crate_name.clone(),
             crate_type: unit.crate_type.clone(),
             package: unit.package.clone(),
+            flags: unit.flags.clone(),
             ..Default::default()
         });
 
@@ -429,6 +506,7 @@ pub fn to_json(units: &[UnitPhases], rate: u32) -> Value {
             "crate": u.crate_name,
             "package": u.package,
             "crate_type": u.crate_type,
+            "flags": u.flags,
             "wall_s": u.wall_s,
             "serial": u.serial,
             "parallel": u.parallel,
@@ -471,6 +549,28 @@ mod tests {
         // file's parent directory would call every one of them `src`
         let lib = unit_of("rustc --crate-name serde /home/u/.cargo/registry/src/index.crates.io-1/serde-1.0.229/src/lib.rs --crate-type lib -C 'metadata=ccc'").unwrap();
         assert_eq!(lib.package, "serde-1.0.229");
+    }
+
+    #[test]
+    fn build_flags_keep_the_shape_and_drop_the_machine() {
+        let pn = "rustc --crate-name serde /home/zack/.cargo/registry/src/index.crates.io-1/serde-1.0.0/src/lib.rs                   --crate-type lib '--edition=2021' --target aarch64-apple-darwin                   -C 'opt-level=3' -C 'debuginfo=2' -C 'codegen-units=16' -C 'panic=abort'                   -C 'incremental=/home/zack/proj/target/debug/incremental'                   -C 'metadata=abc' -C 'extra-filename=-abc'                   --cfg 'feature=\"derive\"' --cfg 'feature=\"std\"'                   --out-dir /home/zack/proj/target/debug/deps                   -L 'dependency=/home/zack/proj/target/debug/deps'";
+        let f = unit_of(pn).unwrap().flags;
+        assert_eq!(f.get("opt-level").map(String::as_str), Some("3"));
+        assert_eq!(f.get("codegen-units").map(String::as_str), Some("16"));
+        assert_eq!(f.get("panic").map(String::as_str), Some("abort"));
+        assert_eq!(f.get("edition").map(String::as_str), Some("2021"));
+        assert_eq!(
+            f.get("target").map(String::as_str),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(f.get("features").map(String::as_str), Some("derive,std"));
+        // incremental changes every timing in the session, so its presence is
+        // recorded -- but its value is a path and must not be
+        assert_eq!(f.get("incremental").map(String::as_str), Some("true"));
+        // nothing naming the builder's machine may survive
+        let all = f.values().cloned().collect::<Vec<_>>().join(" ");
+        assert!(!all.contains("/home/zack"), "leaked a path: {all}");
+        assert!(!f.contains_key("extra-filename"));
     }
 
     #[test]
