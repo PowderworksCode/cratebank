@@ -1,67 +1,90 @@
 # Ingest and storage
 
-**Cloudflare Pipelines does the ingest, and we write no server code.**
-
-Pipelines accepts JSON over HTTP, transforms it with SQL, and writes Parquet to
-R2 with exactly-once delivery. That is the whole pipeline this project needed,
-minus the part where we operate it.
+**A ~60-line Worker takes a compressed blob and puts it in R2. That is the
+entire ingest.**
 
 ```
-cargo-cratebank ──POST JSON──▶ Pipelines stream ──SQL──▶ R2 (zstd parquet, date-partitioned)
+cargo-cratebank ──POST zstd blob──▶ Worker ──put()──▶ r2://cratebank/sessions/year=/month=/day=/*.json.zst
                                                               │
                                                               ▼
-                                              DuckDB / R2 SQL / anything reading parquet
+                                                   DuckDB reads it directly
 ```
 
-## Why not a Worker, a queue, or a server
+The Worker does not decompress, parse, validate or interpret the body. The bytes
+the client compresses are the bytes stored in R2 are the bytes a query engine
+reads. *Capture generously, model nothing at ingest* — enforced by there being
+no code that could do otherwise.
 
-The obvious alternative — a Worker that validates and writes to R2 — costs us a
-codebase, a deploy story, a schema-migration story, and a batching layer to
-avoid writing one tiny object per build. Pipelines has all of that as
-configuration: `wrangler pipelines setup`, a roll interval, a partition pattern.
-The only thing we lose is arbitrary validation at the edge, which we do not want
-at the edge anyway — the collection design is *capture generously, model
-nothing at ingest*.
+## Why not Pipelines
+
+This document previously specified Cloudflare Pipelines, on the grounds that it
+gave us JSON-over-HTTP, SQL transforms, and parquet on R2 as pure configuration
+with no code to own. That was a good trade on paper. It was built, deployed,
+measured against, and abandoned the same day, for reasons only a live account
+could reveal:
+
+| | Pipelines | Worker |
+| --- | --- | --- |
+| Max request | 5 MB, **decompressed** | 100 MB (Free/Pro plan limit) |
+| Max single message | **1 MB** — undocumented | n/a |
+| Compression accepted | gzip only | anything; we never decode it |
+| Failure mode | accepts, then **silently drops** | `put()` succeeds or throws |
+| Time to queryable | 300s sink roll | immediate |
+
+The binding constraint was the 1 MB per-message cap, which appears on no
+documentation page and only exists as error code `1018`. The client sends one
+object per session, so an entire build counted as a single message — capping
+submissions at roughly a third of what this document projects a large build to
+produce. Escaping that meant writing a client-side batching layer, which is a
+codebase, a deploy story and a schema-migration story of its own. The Worker is
+smaller than the batching layer would have been.
+
+The "no server code" property was real and worth wanting. It cost 60 lines to
+give up, and it bought a 100× headroom increase and the removal of an entire
+class of silent failure.
 
 ## The endpoint
 
 The client posts to **our** hostname, never Cloudflare's:
 
 ```
-POST https://ingest.cratebank.io
-Content-Type: application/json
+POST https://ingest.cratebank.io/v1/sessions
+Content-Type: application/zstd
 
-[ {...}, {...} ]          # a JSON array, not a single object
+<zstd-compressed session JSON>
 ```
 
-`ingest.cratebank.io` is a CNAME to the stream's
-`{stream-id}.ingest.cloudflare.com`. That indirection is worth having from the
-first request: the stream id is an implementation detail, streams cannot be
-altered after creation so we will eventually need to move to a new one, and a
-released client that hardcodes a Cloudflare hostname can never be redirected.
-Contributors upgrade slowly; the name they were shipped with has to remain
-correct.
+One session, one request, one object in R2. The body is a compressed blob, not
+a compressed *representation* of a JSON request — hence `content-type:
+application/zstd` and deliberately **no** `Content-Encoding` header, which would
+invite an intermediary to decode the body before the Worker sees it.
 
-Authentication is **optional per stream**, and v1 runs with it off: a
-contributor needs no account, no token, no signup. (Pipelines' own auth uses a
-Cloudflare API token scoped `Workers Pipeline Send` — an account-level
-credential that could not be shipped inside a public binary anyway, which is why
-the eventual answer is a Worker rather than stream auth.)
+A Workers custom domain binds `ingest.cratebank.io` to the script and manages
+its own DNS record. The indirection still matters for the reason it always did:
+a released client hardcodes this name, contributors upgrade slowly, and the name
+they were shipped with has to keep working however the implementation behind it
+moves. `/v1/` is the version boundary — the Worker owns the path, so a `/v2/`
+with a different payload shape can run alongside it.
+
+Responses are JSON. `200 {"success":true,"key":"sessions/year=…"}` on success;
+the key is returned so a contributor can see exactly what was stored.
+
+Authentication is off in v1: a contributor needs no account, no token, no
+signup.
 
 ## Authentication
 
-Pipelines' own stream auth uses a Cloudflare API token scoped `Workers Pipeline
-Send`. That is an **account-level credential**: shipping it inside a public
-binary would hand every contributor a key to the account, and revoking it would
-break every client at once. So stream auth is not the mechanism for a public
-census — the options are what sits in front.
+Nothing that ships inside a public binary can be an account-level credential:
+it would hand every contributor a key to the account, and revoking it would
+break every client at once. That rules out the obvious answers and leaves the
+question of what the Worker should check.
 
 | option | code | credential | revocable | self-serve | notes |
 | --- | --- | --- | --- | --- | --- |
-| none (public stream) | none | — | — | — | submission counts untrustworthy |
+| none (public endpoint) | none | — | — | — | submission counts untrustworthy; **today** |
 | **Access service tokens** | **none** | client id + secret, per consumer | per token | no — we issue them | config only; ideal for organisations |
-| **Worker + our tokens** | ~100 lines | our token, per contributor | per token | yes | most flexible; see below |
-| Worker + GitHub device flow | more | GitHub identity | per user | yes | strongest identity, most machinery |
+| **our tokens, checked in the Worker** | ~20 lines | our token, per contributor | per token | yes | most flexible; see below |
+| GitHub device flow in the Worker | more | GitHub identity | per user | yes | strongest identity, most machinery |
 | mTLS / API Shield | none | client cert | per cert | no | too heavy for volunteers |
 
 Two are worth taking seriously.
@@ -72,10 +95,10 @@ policy on the ingest hostname, and callers present `CF-Access-Client-Id` and
 The catch is that *we* issue every token, so it fits organisations ("here is
 Acme's credential") and not a volunteer who wants to contribute this afternoon.
 
-**A Worker in front of Pipelines** is the general answer, and it costs less than
-it sounds: Worker bindings need **no API token** at all — `await
-env.STREAM.send(events)` — so the Worker authenticates the contributor and
-forwards over a binding that carries no shippable secret.
+**Checking a token in the Worker** is the general answer, and it now costs
+almost nothing: the Worker already exists and already reaches R2 through a
+binding — `await env.BUCKET.put(...)` — so there is no shippable secret anywhere
+in the request path. Authentication is one `if` before the `put`.
 
 Tokens can be stateless: `token = id.HMAC(id, secret)`, verified with one
 secret in the Worker, no database. Revocation is a small KV denylist.
@@ -83,28 +106,25 @@ Registration can be instant and anonymous (`cargo cratebank register`), which
 makes a token less an identity than a **handle** — something to rate-limit
 against and revoke, which an IP is not.
 
-### The Worker earns its keep beyond auth
+### The Worker is already there
 
-Auth is the reason to add it, but three other things fall out, and together they
-are worth more:
+This section used to argue that a Worker would be worth building *if* we ever
+needed auth. That argument is settled — the Worker exists for unrelated reasons,
+so adding auth is now a change to a file we already own rather than a new
+component. Concretely, it means:
 
-1. **Flattening moves server-side.** The client can keep sending one session
-   object — the shape it already produces — and the Worker splits it into
-   `sessions` and `units` rows. The client stays dumb and the row schema can
-   change without a client release, which matters because contributors upgrade
-   slowly and cargo's log schema is still moving.
-2. **Batching moves server-side** too, so the 5 MB request limit stops being the
-   client's problem.
-3. **A version boundary.** Payload schema, stream layout and Pipelines config
-   can all change behind one stable endpoint.
-
-That reverses the client work this document originally called for: with a Worker,
-points 1–3 of *What has to change in the client* become the Worker's job, and the
-client only gains a token header.
+1. **Verification costs a few lines, not an architecture.** Checking an HMAC
+   header before `env.BUCKET.put()` is a small edit to `infra/worker/ingest.js`.
+2. **No shippable secret.** The Worker reaches R2 through a binding, so nothing
+   in the request path needs a credential that could be extracted from a public
+   binary — which was the objection that ruled out every other option above.
+3. **A version boundary already exists.** `/v1/sessions` is a path the Worker
+   controls; auth can land on `/v2/` while `/v1/` keeps accepting anonymous
+   submissions from older clients.
 
 ### Decision: start authless
 
-**v1 ships with no authentication.** A public Pipelines stream, a WAF rate limit,
+**v1 ships with no authentication.** A public Worker endpoint, a WAF rate limit,
 and data flowing this week. The reasons are practical rather than principled:
 nothing downstream exists yet, so there is nothing to protect; the credential
 design above is only worth building once the shape of the data has settled; and
@@ -125,8 +145,8 @@ What that costs, stated plainly:
 
 Two things make this reversible rather than a trap:
 
-1. **Every row is tagged with how it arrived** (`trust: anonymous` today) from
-   the first row stored. Adding tiers later is then a filter, not a migration,
+1. **Every submission is tagged with how it arrived** (`trust: anonymous` today)
+   from the first object stored. Adding tiers later is then a filter, not a migration,
    and the pre-auth data does not have to be thrown away or silently mixed in.
 2. **The endpoint is not advertised** until auth exists. Authless is fine while
    contributors are people we asked directly; it stops being fine the moment a
@@ -136,36 +156,34 @@ When it is time, the options are above: Access service tokens for organisations
 that want a credential they can rotate and audit, or a Worker issuing
 self-serve keys so the long tail is not gated on us answering email.
 
-## One stream, stored verbatim
+## One blob per build, stored verbatim
 
 An earlier draft of this document had the client flatten each build into
 `sessions` and `units` rows, on the theory that a nested array of 300 events is
 not a columnar row. That was wrong twice over.
 
-**Pipelines cannot do it.** Its SQL has `WITH`, `SELECT`, `WHERE` and `UNNEST`,
-but no joins and no aggregation. `UNNEST(events)` produces one row per *event*,
-and our events are heterogeneous — `unit-registered` carries the package id and
-features, `unit-finished` carries elapsed time, `unit-section-finished` carries
-the frontend/codegen split — all correlated by `index`. One row per unit is a
-self-join, which is not on the menu.
+**It needs a join, at the edge, where there is none.** Our events are
+heterogeneous — `unit-registered` carries the package id and features,
+`unit-finished` carries elapsed time, `unit-section-finished` carries the
+frontend/codegen split — all correlated by `index`. One row per unit is a
+self-join. That was impossible in Pipelines SQL, and in a Worker it would be
+possible but wrong: it is real parsing logic, running once, at the only moment
+that cannot be re-run.
 
-**Nor should it.** Streams can be **unstructured**: a single `value` column
-holding any valid JSON, no validation. And structured streams have a property
-that settles the argument — *"schema modifications are not supported after
-stream creation"*. Declaring a schema today freezes today's field names into
-infrastructure we cannot alter, while cargo's log format is explicitly still
-moving and every field it gains would be silently dropped. That is exactly the
-mistake this project's collection principle exists to prevent: measurement
-happens once, parsing happens forever.
+**Nor should it.** Declaring a shape today freezes today's field names, while
+cargo's log format is explicitly still moving and every field it gains would be
+silently dropped. That is exactly the mistake this project's collection
+principle exists to prevent: measurement happens once, parsing happens forever.
 
-So v1 is one unstructured stream, one R2 sink, and no transform SQL at all:
+So v1 stores the payload byte-for-byte and interprets nothing:
 
 ```
-cargo-cratebank ──POST──▶ [stream: unstructured] ──▶ [sink: R2 parquet, zstd] ──▶ r2://cratebank/raw/
+cargo-cratebank ──POST zstd blob──▶ [Worker: put()] ──▶ r2://cratebank/sessions/
 ```
 
-The payload lands as one row per build with its JSON intact. Nothing is
-interpreted at ingest, so nothing can be lost by interpreting it wrongly.
+Nothing is interpreted at ingest, so nothing can be lost by interpreting it
+wrongly. This is not a compromise forced by a limitation — it is the same
+conclusion the Pipelines design reached, arrived at with fewer moving parts.
 
 Anything that wants rows rather than payloads reads them out later, with a real
 query engine that has joins. Correlating `unit-registered` with `unit-finished`
@@ -173,44 +191,87 @@ by index is trivial there and impossible in streaming SQL — and, unlike a
 transform baked into the pipeline, a reading done later can be corrected and
 rerun over everything already collected.
 
-## Limits, and the one that binds
+## Limits
 
-Open-beta limits: **5 MB per request**, 5 MB/s per stream, 20 streams / 20
-pipelines / 20 sinks per account.
+The Worker's ceiling is the **request body size for the zone's plan**: 100 MB on
+Free and Pro, 200 MB on Business, 500 MB on Enterprise. Nothing else in the path
+binds — the body streams to R2 without being buffered, so the Worker's 128 MB
+memory limit is not a second ceiling, and CPU time is irrelevant for a handler
+that never decodes the payload.
 
-Measured against real payloads: ~398 bytes per event, so a 1,000-unit build
-projects to **≈3.0 MB in one request** — under the limit, but not by much, and
-the fleet's largest projects are that size. Two consequences:
+Measured on a real 115-unit build: 1.6 KB per unit uncompressed, so a
+1,000-unit build projects to **≈1.6 MB** in one request before compression, and
+~115 KB after it. Against 100 MB neither figure is a constraint, so **the client
+does not batch** — it compresses one session and posts it.
 
-The client must **batch** if the limit counts decompressed bytes: split
-oversized builds across several requests, with the session header on each chunk
-so partial delivery stays interpretable. If it counts compressed bytes, the
-largest builds are ~260 KB and batching is unnecessary — see *Payload size*
-below.
+For contrast, the same projection against the Pipelines limits this document
+used to specify: 1.6 MB sat under the 5 MB request cap but was **well over the
+undocumented 1 MB per-message cap**, and the client sends one object per
+session, so a large build would have been rejected outright. Batching existed as
+a requirement solely to work around that, and the Worker deleted the
+requirement rather than satisfying it.
 
-The 5 MB/s per-stream ingest rate is the one to watch at scale: it is roughly
-150 medium builds per second, which is a long way off, but it is a per-stream
-cap and the fix is more streams (20 allowed) or a limit-increase request.
+What to watch instead, at scale, is R2 Class A operations: one `PutObject` per
+submission, priced at $4.50/million with the first million each month free. See
+*Cost*.
 
 ## Payload size
 
-Measured on a real session (91 events, 43 units):
+Measured on a real session — cratebank building itself, 957 events, 115 units,
+204 sections:
+
+| | bytes | vs compact |
+| --- | --- | --- |
+| compact JSON | 184,690 | — |
+| **zstd -19 — what the client sends** | **13,325** | **13.9x** |
+
+An earlier, much smaller session (91 events, 43 units) gave the comparison
+across codecs:
 
 | | bytes | vs compact |
 | --- | --- | --- |
 | compact JSON | 25,928 | — |
 | gzip -9 | 2,912 | 8.9x |
-| **brotli q11 — what the client sends** | **2,455** | **10.6x** |
+| brotli q11 | 2,455 | 10.6x |
 | slimmed JSON (no repeated `run_id`, delta timestamps) | 18,829 | 1.4x |
 | slimmed **and** gzipped | 2,539 | 10.2x |
 
+zstd beats every one of those ratios on the larger session, which is what should
+be expected: the bigger the build, the more repeated structure there is for the
+window to find. Note also that the per-event cost falls with size — 193 bytes
+per event here against the ~398 this document projects from the small sample —
+so extrapolations from short builds overestimate.
+
 Three conclusions, in order of how much they matter.
 
-**Compress the request body — done.** The client sends brotli q11 with
-`Content-Encoding: br`, measured at 10.6x on a real session (25 KB → 2.4 KB) and
-16% better than gzip. The `brotli` crate is pure Rust, so nothing needs a C
-toolchain — which matters on Windows, where the one dependency that does
-(`ring`, via TLS) is already the hard part of cross-building.
+Three conclusions, in order of how much they matter.
+
+**Compress the body, with zstd, because DuckDB can read it.** The Worker stores
+the blob byte-for-byte, so the codec is not a transport detail — it is the
+on-disk format in R2 forever, and it decides whether the data is queryable
+without a conversion step:
+
+| codec | `read_json_auto()` |
+| --- | --- |
+| none | reads |
+| gzip | reads |
+| **zstd** | **reads** |
+| brotli | **fails** — `Invalid Input Error: Malformed JSON` |
+
+That table is why the client does not send brotli, despite brotli winning on
+ratio. A brotli blob in R2 is opaque: querying it would require a decompress-
+and-rewrite pass, which is exactly the server-side processing this design exists
+to avoid. zstd gets brotli-class ratios and stays directly readable, so a
+contribution is queryable the moment it lands.
+
+Two historical notes, since both cost real time. Brotli was chosen originally
+for ratio and for being pure Rust; **Pipelines rejected it outright** (`1003
+Must be valid UTF-8 JSON`, along with `zstd` and `deflate` — it decompressed
+gzip and nothing else), so every submission from that client would have failed.
+And the zstd crate *is* a C dependency, which is acceptable only because `ring`
+— pulled in by ureq → rustls for TLS — already requires a C toolchain to build
+this crate at all. If the TLS provider is ever swapped for a pure-Rust one, zstd
+becomes the blocker: there is no pure-Rust zstd **encoder**, only decoders.
 
 **No negotiation and no fallback.** The endpoint is treated as the dumbest thing
 that could work: it takes a blob and stores it, and anything that needs to read
@@ -218,11 +279,10 @@ the contents does so later. If a send fails it is not recorded as sent, so the
 session stays queued and goes out next time — a failed upload costs a retry, not
 a contribution, which is what makes the simplicity affordable.
 
-Inbound `Content-Encoding` remains undocumented for Pipelines (the docs and
-launch blog cover compression only for sink *output*; the one GZIP-on-ingest
-reference belongs to the pre-Arroyo API). If it turns out the endpoint stores
-the compressed bytes rather than decompressing them, that is equally fine —
-processing happens later either way.
+The Worker never inspects `Content-Encoding` at all — it stores what it is
+given — so the only thing that matters is whether a query engine can read the
+result. That is a property of the file, not of the transport, which is why the
+table above is about DuckDB rather than about HTTP.
 
 **Do not slim the payload.** Dropping the `run_id` repeated on every event and
 delta-encoding timestamps removes 27% of the raw bytes — those two fields are a
@@ -232,45 +292,139 @@ client-side decisions about the payload's shape, which this design just removed.
 It becomes worth doing only if compression turns out to be unavailable.
 
 **Do not send parquet from the client.** It would be smaller again — columnar,
-dictionary-encoded, zstd — but the ingest endpoint takes JSON, so parquet means
-writing to R2 directly, which needs credentials, which needs a Worker. That
-trades the no-code ingest for a marginal gain over gzip, and it puts schema
-decisions back in the client where a released binary freezes them. The place
-parquet belongs is the sink, where it already is.
+dictionary-encoded, zstd. The old objection (the endpoint only takes JSON) no
+longer applies, since the Worker stores whatever bytes arrive and would accept
+parquet without noticing. The remaining objection is the one that actually
+mattered: parquet is a *schema*, and putting it in the client freezes cargo's
+still-moving field names into a released binary. Columnarising is a re-runnable
+step over data already collected; doing it at capture time is the one place the
+decision cannot be revised.
 
-### One open question
+### Why those Pipelines limits are recorded here
 
-Whether the 5 MB request limit counts compressed or decompressed bytes. The
-limits page states "Maximum payload size per ingestion request: 5 MB" and says
-nothing about compression state — the word does not appear on the page.
+Kept because they were expensive to learn and are invisible from the
+documentation. All measured against a live stream:
 
-It decides real work: if compressed, the largest builds land near 260 KB and the
-client needs **no batching at all** for v1; if decompressed, batching stays as
-designed. One request against the live endpoint settles it, and it should be the
-first thing tried once an account exists.
+| probe | result |
+| --- | --- |
+| 9 MB payload, gzipped to 8,818 B on the wire | `413 Body must not exceed 5 MB` |
+| 1 message, 900 KB | `200 committed:1` |
+| 1 message, 1.1 MB | `400 1018` — message exceeds 1 MB |
+| 6 messages x 700 KB (4.2 MB) | `200 committed:6` |
+
+Eight kilobytes on the wire, refused for exceeding 5 MB: **the limit counted
+decompressed bytes**, so compression bought nothing against it. Combined with
+the undocumented 1 MB per-message cap, that is what made the Worker the smaller
+option.
+
+### `committed` was an ingestion receipt, not a delivery receipt
+
+The trap that cost most of a day, recorded so nobody re-derives it. Pipelines
+answered `200 {"success":true,"result":{"committed":N}}` for events it then
+**silently discarded** on delivery to the sink — documented Cloudflare behaviour
+for events that do not match the stream schema. Every probe reported success
+while the bucket stayed empty, with no error on any surface. The count was
+visible only via the `pipelinesUserErrorsAdaptiveGroups` GraphQL dataset, which
+needs **Account Analytics · Read** on the API token: 18 events, `missing_field`.
+
+The Worker has no equivalent failure mode. `env.BUCKET.put()` either succeeds or
+throws, the handler returns 500 on a throw, and the client only marks a session
+sent on a 2xx — so a failure leaves the session queued for the next run.
 
 ## Storage layout
 
-R2 sink configuration, all of it flags rather than code:
-
-```
---format parquet --compression zstd
---partition-pattern "year=%Y/month=%m/day=%d"
---roll-interval 300 --roll-size 100
---path cratebank/units
-```
-
-Which produces exactly the layout the schema doc assumed:
+The Worker builds the key; there is no sink configuration and no roll interval,
+because there is no buffering — an object appears the moment the request
+succeeds.
 
 ```
 cratebank/
-  raw/year=2026/month=09/day=03/*.parquet     # what arrived, verbatim
+  sessions/year=2026/month=08/day=21/<uuid>.json.zst   # what arrived, verbatim
 ```
 
-Hive-style partitioning is what every engine expects, so
-`SELECT … FROM 'https://data.cratebank.io/raw/**/*.parquet'` works in DuckDB
-directly, and partition pruning happens automatically for date-filtered
-queries. R2's zero egress is what makes serving that publicly sane.
+Hive-style partitioning is what every engine expects, so date-filtered queries
+prune partitions automatically:
+
+Hive partitioning means a credentialed reader prunes by date for free:
+
+```sql
+-- needs R2 credentials: the S3 API lists objects, which is what expands a glob
+SELECT run_id, counts.events
+FROM read_json_auto('r2://cratebank/sessions/**/*.json.zst', union_by_name=true);
+```
+
+That works because zstd is one of the codecs DuckDB decompresses natively — the
+uploaded bytes are the queried bytes, with no conversion step between
+contribution and query. Verified end to end: a blob written by
+`cargo-cratebank` through the live endpoint reads back with its structs and
+arrays intact.
+
+**A glob cannot be served publicly.** Expanding `**` requires listing, listing
+is an API call, and the API call is what needs credentials — so
+`https://…/sessions/**/*.json.zst` does not work, and DuckDB says so rather
+than failing quietly:
+
+```
+Consider `SET allow_asterisks_in_http_paths = true;` to allow this behaviour
+```
+
+That flag is a trap: it passes the asterisks through *literally* and requests a
+file named `**`, returning 404. The same reasoning rules out R2 Data Catalog,
+whose Iceberg REST endpoint is a service and therefore authenticated: "Iceberg
+clients must authenticate to the catalog with an R2 API token". The public
+surface has to be a *static file at a fixed URL* — see *Compaction*.
+
+One object per submission, rather than the rolled-up files a sink produced. That
+is the trade for immediacy, and it moves the scaling question from bytes to
+Class A operations — see *Cost*. If small-file count ever becomes a problem, a
+scheduled compaction job into parquet is a separate, re-runnable step, which is
+precisely the property this design keeps insisting on.
+
+## Compaction: the public surface
+
+The raw blobs are the ground truth, but they are not a usable public interface:
+reading them needs credentials, because listing needs credentials. So a nightly
+Worker (`infra/worker/compact.js`, cron `0 5 * * *`) rebuilds two flat parquet
+tables at fixed URLs:
+
+| file | one row per | columns |
+| --- | --- | --- |
+| `units.parquet` | compilation unit | `run_id`, `crate`, `mode`, `package_id`, `elapsed`, `frontend`, `codegen`, `link`, `unblocked` |
+| `sessions.parquet` | build | machine profile, load, rustc, counts, `complete` |
+
+```sql
+SELECT crate, round(elapsed, 3) AS secs
+FROM 'https://data.cratebank.io/units.parquet'
+ORDER BY elapsed DESC LIMIT 10;
+```
+
+No credentials, no glob, no extension beyond `httpfs`, and DuckDB range-requests
+only the columns it reads. Dated copies land in `snapshots/` so a bad run can be
+diagnosed against the file it actually produced.
+
+**The unit table is the join already done.** Correlating `unit-registered` with
+`unit-finished` by `index` is the self-join the ingest design deliberately
+defers; doing it here rather than in the client is what makes it correctable —
+a flattening bug is fixed by fixing this Worker and waiting a day, not by
+re-collecting data that no longer exists.
+
+Two implementation notes, both found by running it:
+
+- **Workers cannot decompress zstd.** `DecompressionStream` supports only
+  gzip/deflate/deflate-raw, so the Worker bundles `fzstd` (80 KB, pure JS).
+  With `hyparquet-writer` the whole bundle is 66 KB minified — no WASM, which
+  is what makes parquet-in-a-Worker reasonable at all.
+- **The column builders coerce rather than trust.** `cratebank_schema` is a
+  number where a string was assumed, and it threw at write time after every
+  blob had been decompressed. Since cargo's log format is explicitly still
+  moving, one drifted field must not cost everyone the nightly rebuild.
+
+It is a full rebuild, not an incremental merge, and it holds every row in
+memory. That is free at this scale and will not be: the Worker's ceiling is
+128 MB, so roughly 10k sessions. The escape hatch is per-day compaction into
+`daily/YYYY-MM-DD.parquet` merging only unmerged days, which the hive layout
+already supports. The `objects` and `bytes_in` counters in the cron log are what
+tell you it is coming.
 
 ## Abuse, honestly
 
@@ -288,20 +442,36 @@ than by distinct class is manipulable. Estimates should be robust
 
 ## Cost
 
-Sink pricing is $0.03/GB for JSON output and $0.06/GB for parquet, plus R2
-storage at ~$0.015/GB/month and **zero egress**. At 35 KB per session, a
-million contributed builds a month is ~35 GB — a few dollars of sink cost and
-under a dollar of storage. The public query surface costs nothing to serve,
-which is the property that makes "the census is public" affordable rather than
-aspirational.
+No sink fees, because there is no sink. What remains:
 
-Requires a Workers Paid plan ($5/month).
+| | price | free tier |
+| --- | --- | --- |
+| Workers Paid | $5/month | 10M requests included |
+| R2 storage | $0.015/GB-month | 10 GB-month |
+| R2 Class A (one `PutObject` per submission) | $4.50/million | 1M/month |
+| R2 egress | **free** | — |
+
+At ~3 KB compressed per session, a million contributed builds a month is roughly
+3 GB of storage and 1M Class A operations — which is to say, inside the free
+tier on both, on top of the $5 that was already being spent. The public query
+surface costs nothing to serve, which is the property that makes "the census is
+public" affordable rather than aspirational.
+
+Operations, not bytes, are the thing to watch: one object per submission means
+cost scales with *number of builds*, not their size.
+
+Compaction adds one full read of the bucket per night — N Class B operations
+plus four Class A writes — so at a million sessions it is ~30M Class B a month,
+around $11. That is the first real bill this design produces, and it is also the
+point at which per-day compaction stops being optional.
 
 ## What has to change in the client
 
-**Batching, and nothing else.** The payload shape stays as it is, because the
-stream stores it verbatim. Split builds larger than ~4 MB across several
-requests, keep the session header on each chunk, and that is the whole change.
+**Nothing.** This section previously called for a batching layer; the Worker's
+100 MB ceiling removed the requirement before it was written.
 
-`--dry-run` keeps printing exactly what would be sent, and
-`cargo cratebank serve` remains the reference collector.
+The client compresses one session with zstd and posts it to
+`https://ingest.cratebank.io/v1/sessions`. `--dry-run` prints exactly what would
+be sent, and `cargo cratebank serve` remains the reference collector — it now
+sniffs the zstd magic number rather than trusting a header, because the header
+says nothing about whether the bytes in R2 will be readable.

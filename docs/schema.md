@@ -65,11 +65,11 @@ Linking — and LTO where enabled — is the explicitly non-additive remainder.
 
 Parquet is canonical: frozen spec, every engine reads it, HTTP range reads
 work, and new data is an append. Anything that wants a single-file database
-can build one from the parquet; canonical data never lives only there. Contributed builds land as parquet directly (see `ingest.md`).
+can build one from the raw blobs; canonical data never lives only there. Contributed builds land as zstd-compressed JSON, one object per session (see `ingest.md`).
 
 ```
 cratebank/
-  raw/year=/month=/day=/*.parquet    # what arrived, verbatim
+  sessions/year=/month=/day=/*.json.zst   # what arrived, verbatim
 ```
 
 Not published: compiled artifacts, and sources — crates.io and pinned repos

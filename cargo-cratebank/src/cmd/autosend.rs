@@ -100,8 +100,7 @@ pub fn run(o: &Common, detach: bool) -> i32 {
         return 0;
     }
     let env = crate::buildenv::snapshot(&s.dir);
-    let body = payload(&mut s, env, Value::Null);
-    crate::rusage::prune();
+    let body = payload(&mut s, env, Value::Null, Value::Null);
     match post(&o.endpoint, &body) {
         Ok(_) => {
             mark_sent(&run_id);

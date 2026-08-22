@@ -54,11 +54,19 @@ pub fn run(_o: &Common, port: u16) -> i32 {
         let buf = read_request(&mut s);
         let txt = String::from_utf8_lossy(&buf).to_string();
         let head_len = find_header_end(&buf).unwrap_or(0);
-        let compressed = txt[..head_len.min(txt.len())]
-            .to_lowercase()
-            .contains("content-encoding: br");
+        // The real endpoint is our Worker, which stores the body byte-for-byte
+        // and never decodes it. So the only thing that identifies a blob here
+        // is content-type, and decoding is this collector's own convenience --
+        // it decompresses purely so it can print a human summary.
+        //
+        // Sniff the zstd magic number rather than trusting the header: that is
+        // what actually determines whether the bytes in R2 are readable, and
+        // a client that set the right header while writing the wrong codec is
+        // exactly the regression worth catching.
+        let raw = &buf[head_len..];
+        let compressed = raw.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
         let body = if compressed {
-            crate::ship::decompress(&buf[head_len..]).unwrap_or_default()
+            crate::ship::decompress(raw).unwrap_or_default()
         } else {
             txt.split_once("\r\n\r\n")
                 .map(|x| x.1)
@@ -67,7 +75,7 @@ pub fn run(_o: &Common, port: u16) -> i32 {
         };
         match serde_json::from_str::<Value>(&body) {
             Ok(v) => eprintln!("[ingest]{} run {} · {} events · {} units ({} withheld) · {} sections · {} · rustc {}",
-                if compressed { " br" } else { "" },
+                if compressed { " zstd" } else { "" },
                 v["run_id"].as_str().unwrap_or("?"),
                 v["counts"]["events"], v["counts"]["units"], v["counts"]["units_withheld"],
                 v["counts"]["sections"], v["env"]["host"].as_str().unwrap_or("?"),

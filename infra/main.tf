@@ -1,18 +1,17 @@
 # cratebank ingest, as infrastructure.
 #
-# One R2 bucket, one unstructured stream, one sink, one pipeline that connects
-# them, and a CNAME so the client never learns Cloudflare's hostname.
-#
-# Everything the ingest design calls for is here; there is no server component
-# and no application code.
+# One R2 bucket, one Worker, and a custom domain so the client never learns
+# Cloudflare's hostname. The Worker is worker/ingest.js -- it puts the request
+# body in R2 without decoding it, and that is the whole ingest.
 
 terraform {
   required_version = ">= 1.6"
   required_providers {
     cloudflare = {
       source = "cloudflare/cloudflare"
-      # Pipelines resources landed in 5.19; pin the minor so a provider
-      # upgrade cannot silently change a schema underneath the stream.
+      # Pin the minor: this provider has several optional+computed attributes
+      # whose server-side defaults Terraform reads as drift, and an upgrade
+      # that adds another one turns into a surprise plan. See README.
       version = "~> 5.23"
     }
   }
@@ -30,113 +29,66 @@ resource "cloudflare_r2_bucket" "cratebank" {
   location   = var.bucket_location
 }
 
-# ── ingest ───────────────────────────────────────────────────────────────────
+# ── the Worker that replaced the stream ──────────────────────────────────────
 
-# Unstructured: a single `value` column holding whatever JSON arrives.
+# Pipelines capped a request at 5 MB and each message at 1 MB, and the client
+# sends one object per session -- so the 1 MB cap was the binding one, roughly
+# a third of what a large build produces. A Worker's ceiling is the plan's
+# request-body limit (100 MB on Free/Pro), which removes the batching problem
+# rather than working around it.
 #
-# This is deliberate rather than lazy. Structured streams cannot have their
-# schema modified after creation, and cargo's log format is still moving — a
-# declared schema would freeze today's field names into infrastructure we
-# cannot alter, and silently drop every field cargo adds. Nothing is
-# interpreted at ingest, so nothing can be lost by interpreting it wrongly.
-resource "cloudflare_pipeline_stream" "sessions" {
-  account_id = var.account_id
-  name       = "cratebank_sessions"
+# The script never decompresses or parses the body; it streams the bytes to R2
+# unchanged. See worker/ingest.js.
+resource "cloudflare_workers_script" "ingest" {
+  account_id  = var.account_id
+  script_name = "cratebank-ingest"
 
-  format = {
-    type = "json"
-  }
+  content     = file("${path.module}/worker/ingest.js")
+  main_module = "ingest.js"
 
-  schema = {
-    fields = [{
-      name     = "value"
-      type     = "json"
-      required = true
-    }]
-  }
+  # Pinned: a compatibility date is the Workers runtime's schema version, and
+  # letting it float means a runtime change can alter behaviour under us.
+  compatibility_date = "2026-08-21"
 
-  http = {
-    enabled = true
-    # v1 is authless: see docs/ingest.md. The endpoint stays unadvertised
-    # until this flips, and every row is tagged trust: anonymous meanwhile,
-    # so adding auth later is a filter rather than a migration.
-    authentication = false
-    cors           = {}
-  }
+  bindings = [{
+    name        = "BUCKET"
+    type        = "r2_bucket"
+    bucket_name = cloudflare_r2_bucket.cratebank.name
+  }]
 
-  worker_binding = {
-    enabled = false
-  }
-}
-
-# ── sink ─────────────────────────────────────────────────────────────────────
-
-resource "cloudflare_pipeline_sink" "raw" {
-  account_id = var.account_id
-  name       = "cratebank_raw"
-  type       = "r2"
-
-  format = {
-    type            = "parquet"
-    compression     = "zstd"
-    row_group_bytes = 134217728 # 128 MiB
-    # The stream carries one arbitrary-JSON column; tell the sink not to try to
-    # impose a shape on it. Confirm with `plan` -- see README.
-    unstructured = true
-  }
-
-  # Empty schema: the sink inherits the stream's single json column.
-  schema = { fields = [] }
-
-  config = {
-    account_id = var.account_id
-    bucket     = cloudflare_r2_bucket.cratebank.name
-    path       = "raw"
-
-    # Hive-style partitioning is what every query engine expects, so
-    # SELECT ... FROM 'https://.../raw/**/*.parquet' prunes by date for free.
-    partitioning = {
-      time_pattern = "year=%Y/month=%m/day=%d"
+  # Declared in full, not just `enabled = true`. These sub-fields are
+  # optional+computed: the server fills in whatever is omitted, and Terraform
+  # then reads the difference as a removal and re-uploads the script on every
+  # single plan. Same shape of trap as a stream's server-generated schema.
+  observability = {
+    enabled            = true
+    head_sampling_rate = 1
+    logs = {
+      enabled            = true
+      head_sampling_rate = 1
+      invocation_logs    = true
+      persist            = true
     }
-
-    # Roll on whichever comes first. Five minutes keeps tail latency low
-    # without producing a swarm of tiny objects at low volume.
-    rolling_policy = {
-      interval_seconds = 300
-      file_size_bytes  = 104857600 # 100 MiB
-    }
-
-    credentials = {
-      access_key_id     = var.r2_access_key_id
-      secret_access_key = var.r2_secret_access_key
+    traces = {
+      enabled            = false
+      head_sampling_rate = 1
+      persist            = true
     }
   }
 }
 
-# ── the pipeline: stream in, sink out, no transform ──────────────────────────
-
-# SELECT * on purpose. Pipelines SQL has no joins, and our events are
-# heterogeneous and correlated by index, so anything that wants rows per
-# compilation unit must do that later with a real query engine — where it can
-# also be corrected and rerun over everything already collected.
-resource "cloudflare_pipeline" "cratebank" {
-  account_id = var.account_id
-  name       = "cratebank"
-  sql        = "INSERT INTO ${cloudflare_pipeline_sink.raw.name} SELECT * FROM ${cloudflare_pipeline_stream.sessions.name}"
-}
-
-# ── the name the client ships with ───────────────────────────────────────────
-
-# The stream id is an implementation detail, streams cannot be altered after
-# creation so one day we will need a different one, and a released client that
-# hardcoded a Cloudflare hostname could never be redirected.
-resource "cloudflare_dns_record" "ingest" {
+# The hostname the client ships with. A Workers custom domain creates and
+# manages its own DNS record, so this replaces the CNAME entirely -- do not
+# also declare a cloudflare_dns_record for the same name.
+#
+# Needs *zone* permissions on the API token (Workers Routes · Edit and DNS ·
+# Edit, scoped to the zone); the account-scoped token that builds everything
+# else cannot see the zone at all.
+resource "cloudflare_workers_custom_domain" "ingest" {
   count = var.zone_id == "" ? 0 : 1
 
-  zone_id = var.zone_id
-  name    = "ingest"
-  type    = "CNAME"
-  content = cloudflare_pipeline_stream.sessions.endpoint
-  ttl     = 300
-  proxied = false
+  account_id = var.account_id
+  zone_id    = var.zone_id
+  hostname   = "ingest.${var.zone_name}"
+  service    = cloudflare_workers_script.ingest.script_name
 }

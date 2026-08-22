@@ -1,0 +1,15 @@
+{
+  "name": "cratebank-workers",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild compact.js --bundle --format=esm --minify --outfile=dist/compact.js"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1",
+    "hyparquet-writer": "^0.16.6"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

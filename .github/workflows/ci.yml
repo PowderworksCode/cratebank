@@ -1,10 +1,10 @@
 name: ci
 
-# Nothing here touches Cloudflare. There is no local emulator for Pipelines --
-# Miniflare simulates the Worker *binding*, not the HTTP ingest endpoint, the
-# SQL transform or the R2 sink -- and a mock we wrote ourselves would only
-# assert our guesses about undocumented behaviour back to us. The properties we
-# cannot check here are checked by infra/verify.sh against a real account.
+# Nothing here touches Cloudflare. The ingest Worker can be exercised locally
+# with `wrangler dev --local`, which gives a simulated R2 binding, so the whole
+# put-a-blob path is testable offline -- but that is a developer step, not a CI
+# one, and the properties that depend on a real account (DNS, custom domain,
+# plan limits) are checked by deploying.
 
 on:
   push: { branches: [main] }
@@ -69,6 +69,63 @@ jobs:
       # so `plan` against a real account remains the only real check.
       - run: terraform validate
         working-directory: infra
+      # The Worker is the ingest path now; check it parses.
+      - run: node --check worker/ingest.js
+        working-directory: infra
+
+  # worker/dist/compact.js is committed so `tofu apply` works without a node
+  # toolchain. That only stays honest if the bundle matches its source, so
+  # rebuild it and fail on any drift -- otherwise a fix to compact.js could sit
+  # in the repo for weeks while the deployed Worker runs the old bytes.
+  worker-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+        working-directory: infra/worker
+      - run: npm run build
+        working-directory: infra/worker
+      - name: bundle is up to date with its source
+        run: git diff --exit-code -- dist/compact.js
+        working-directory: infra/worker
+
+  # Sampling is how phases are measured, so prove it works on a runner rather
+  # than only on a laptop. Linux only, deliberately: on macOS samply injects a
+  # preload dylib into every child, and hosted arm64e runners reject it --
+  # every build script dies with SIGABRT. That is why the client treats a
+  # failed sampler as a loud warning and re-runs the build plainly.
+  sampling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: allow perf events
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.perf_event_mlock_kb=2048 || true
+      - run: cargo install samply --locked
+      - name: sample a real build
+        working-directory: cargo-cratebank
+        run: |
+          samply record --save-only --unstable-presymbolicate --include-args \
+            -o /tmp/p.json --rate 999 -- cargo build
+      - name: the profile must attribute samples to units
+        run: |
+          python3 - <<'EOF'
+          import json, re
+          d = json.load(open('/tmp/p.json'))
+          n = sum(len(t['samples'].get('time') or []) for t in d['threads'])
+          units = [t for t in d['threads'] if '--crate-name' in (t.get('processName') or '')]
+          sy = json.load(open('/tmp/p.syms.json'))
+          crates = {m.group(1) for s in sy['string_table']
+                    for m in [re.match(r'^(rustc_[a-z_]+)::', str(s))] if m}
+          print(f"samples={n} unit-threads={len(units)} rustc-crates={len(crates)}")
+          assert n > 0, "no samples"
+          assert units, "--include-args exposed no rustc command lines"
+          assert crates, "no rustc symbols resolved"
+          EOF
 
   straitjacket:
     runs-on: ubuntu-latest
