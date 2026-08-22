@@ -1,14 +1,15 @@
 name: ci
 
-# Nothing here touches Cloudflare. The ingest Worker can be exercised locally
-# with `wrangler dev --local`, which gives a simulated R2 binding, so the whole
-# put-a-blob path is testable offline -- but that is a developer step, not a CI
-# one, and the properties that depend on a real account (DNS, custom domain,
-# plan limits) are checked by deploying.
+# This workflow is deliberately credential-free. Privileged previews and real
+# remote-state plans live in preview.yml, whose approval gate is loaded from
+# the default branch rather than from pull-request code.
 
 on:
   push: { branches: [main] }
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   client:
@@ -16,7 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: clippy, rustfmt }
+        with:
+          components: clippy,rustfmt
       - run: cargo fmt --check
         working-directory: cargo-cratebank
       - run: cargo clippy --all-targets -- -D warnings
@@ -59,24 +61,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - run: terraform fmt -check -recursive
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version_file: .opentofu-version
+          tofu_wrapper: false
+      - run: tofu fmt -check -recursive
         working-directory: infra
-      - run: terraform init -backend=false
+      - run: tofu init -backend=false
         working-directory: infra
       # Catches resource and top-level argument names. It does NOT catch wrong
       # nesting inside config blocks -- it once passed a key named bogus_key --
       # so `plan` against a real account remains the only real check.
-      - run: terraform validate
+      - run: tofu validate
         working-directory: infra
       # The Worker is the ingest path now; check it parses.
       - run: node --check worker/ingest.js
         working-directory: infra
 
-  # worker/dist/compact.js is committed so `tofu apply` works without a node
-  # toolchain. That only stays honest if the bundle matches its source, so
-  # rebuild it and fail on any drift -- otherwise a fix to compact.js could sit
-  # in the repo for weeks while the deployed Worker runs the old bytes.
+  # The compactor bundle is committed so `tofu plan` has everything it reads.
+  # The site is rendered into an ignored static-assets directory and checked
+  # as build output rather than committed.
   worker-bundle:
     runs-on: ubuntu-latest
     steps:
@@ -87,8 +91,11 @@ jobs:
         working-directory: infra/worker
       - run: npm run build
         working-directory: infra/worker
-      - name: bundle is up to date with its source
-        run: git diff --exit-code -- dist/compact.js
+      - name: build outputs are valid
+        run: |
+          git diff --exit-code -- dist/compact.js
+          test -s dist/site/index.html
+          grep -q '<h1>cratebank</h1>' dist/site/index.html
         working-directory: infra/worker
 
   # Sampling is how phases are measured, so prove it works on a runner rather

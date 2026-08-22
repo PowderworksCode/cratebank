@@ -13,13 +13,6 @@ cloudflare_api_token = ""
 # Dashboard URL: dash.cloudflare.com/<this is your account id>
 account_id = ""
 
-# Out-of-band R2 access (aws-cli, rclone). NOT used by the Worker, which
-# reaches the bucket through a binding and needs no credential.
-# R2 object storage > Account Details > Manage next to API Tokens,
-# with Object Read & Write. Separate from the token above.
-r2_access_key_id     = ""
-r2_secret_access_key = ""
-
 # Optional. Leave empty on a first apply: the custom domain is skipped and the
 # Worker is reachable at its workers.dev subdomain, so the path is testable
 # before the domain exists.

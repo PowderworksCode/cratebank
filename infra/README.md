@@ -1,21 +1,72 @@
 # infra
 
-The whole ingest stack as Terraform: one R2 bucket, one Worker, one custom
-domain. The Worker is ~60 lines in `worker/ingest.js` and does one thing — it
-puts the request body in R2 without decoding it.
+The whole cratebank stack: Terraform owns the R2 data bucket, two request-time
+Workers, domains, and the compaction cron; Wrangler uploads the static landing
+page. Merges to `main` deploy both through `.github/workflows/deploy.yml`, so a
+developer laptop is not part of the ongoing deployment path.
 
-## Apply it
+## GitHub deployment
+
+The workflow renders the landing page, builds the compaction Worker, uploads
+the page as Workers Static Assets, makes an OpenTofu plan, and applies that
+exact saved plan. The `production` environment and workflow concurrency provide
+the approval and serialization boundaries.
+
+Approved pull requests also use the `preview` environment to:
+
+- deploy the rendered page to a disposable `cratebank-site-pr-<number>`
+  workers.dev URL;
+- make a speculative OpenTofu plan against the private R2 state; and
+- maintain one PR comment containing the preview link and redacted plan output.
+
+PRs authored by `zmaril` run automatically. For every other author, `zmaril`
+must use the exact `/preview <full-head-sha>` command that the bot posts; that
+binds approval to one revision, so a later push needs another approval. The
+privileged workflow is loaded from `main` with `pull_request_target` or
+`issue_comment`, which prevents PR code from weakening its own gate. It also
+checks the approved SHA is still current before executing PR code. Closing or
+merging the PR deletes its preview Worker. No binary PR plan is retained: plan
+files can contain cleartext secrets even when the CLI output hides them.
+
+Create a private R2 bucket named `cratebank-tofu-state`. Do not add a custom
+domain to it and do not reuse the public `cratebank` data bucket: OpenTofu state
+contains the manual compaction secret. Create an R2 Object Read & Write token
+scoped to this state bucket.
+
+Configure a GitHub environment named `production` with:
+
+| kind | name | value |
+| --- | --- | --- |
+| variable | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account id |
+| variable | `CLOUDFLARE_ZONE_ID` | `cratebank.io` zone id |
+| secret | `CLOUDFLARE_API_TOKEN` | token described below |
+| secret | `COMPACT_SECRET` | existing bearer token for `POST /compact` |
+| secret | `TOFU_STATE_ACCESS_KEY_ID` | state-bucket-scoped R2 access key |
+| secret | `TOFU_STATE_SECRET_ACCESS_KEY` | matching R2 secret key |
+
+Create a second environment named `preview` with the same variables and
+secrets. Restrict it to `main`: the trusted approval workflow itself runs from
+the default branch and explicitly checks out only the approved PR merge.
+Production also remains restricted to `main`.
+
+Before merging the workflow, migrate the existing local state once from the
+checkout that currently owns it:
 
 ```sh
-cp terraform.tfvars.example prod.tfvars   # gitignored; fill it in
-tofu init
-tofu plan  -var-file=prod.tfvars          # <- the real check, see below
-tofu apply -var-file=prod.tfvars
+export AWS_ACCESS_KEY_ID='<state bucket access key>'
+export AWS_SECRET_ACCESS_KEY='<state bucket secret key>'
+export AWS_ENDPOINT_URL_S3='https://<account id>.r2.cloudflarestorage.com'
+
+tofu init -migrate-state -backend-config='bucket=cratebank-tofu-state'
+tofu plan -var-file=prod.tfvars
 ```
 
-Leave `zone_id` empty on a first apply. The custom domain is skipped and the
-Worker is reachable at its `workers.dev` subdomain, so the whole path can be
-tested before the domain exists.
+After that migration, a pull request gets a preview and a speculative plan.
+Deploy by merging to `main` or by running the `deploy` workflow manually. The
+production job creates and applies a fresh saved plan after merge; it never
+applies the speculative PR plan. Do not restore a local backend or run
+concurrent local applies; GitHub is the production writer. Local plans still
+work with the same three `AWS_*` variables and `-backend-config` argument.
 
 ## OpenTofu, not Terraform
 
@@ -24,29 +75,25 @@ frozen at 1.5.7 and marked deprecated because the next release changed to BUSL.
 Use `brew install opentofu` and run `tofu`. The config is plain HCL with nothing
 HashiCorp-specific in it, so either binary works if you have a recent one.
 
-### Credentials
+### Cloudflare credentials
 
 Two separate things, which is the usual place to get stuck:
 
 | | where | permissions |
 | --- | --- | --- |
 | `cloudflare_api_token` | dash → profile → API Tokens | Account · Workers Scripts · Edit; Account · Workers R2 Storage · Edit; Zone · Workers Routes · Edit; Zone · DNS · Edit |
-| `r2_access_key_id` / `r2_secret_access_key` | dash → R2 object storage → **Account Details** panel → **Manage** next to **API Tokens** | Object Read & Write |
+| state R2 access key / secret | dash → R2 object storage → **Account Details** panel → **Manage** next to **API Tokens** | Object Read & Write, scoped to `cratebank-tofu-state` |
 
 Adding any Zone-level row makes a **Zone Resources** selector appear below
 Account Resources. It defaults to *All zones* — set it to *Include →
 cratebank.io* unless you want a token in a `.env` that can rewrite DNS for every
 domain on the account.
 
-The R2 keys are not used by the Worker, which reaches the bucket through a
-binding and needs no credential at all. They exist for out-of-band access:
-`aws s3 ls --endpoint-url https://<account>.r2.cloudflarestorage.com`.
+The R2 state keys are not used by a Worker. Workers reach the public data
+bucket through bindings and need no storage credential.
 
-If the R2 token screen is unreachable, the keys can be derived from any token
-with R2 permissions: `access_key_id` is the token's **ID**, and
-`secret_access_key` is `printf '%s' "$TOKEN" | shasum -a 256 | cut -d" " -f1`.
-Use `printf`, not `echo` — a trailing newline changes the hash and fails
-opaquely much later.
+Keep the state token bucket-scoped. Anyone who can read the state object can
+read sensitive Worker bindings even though GitHub masks the original secret.
 
 ## `plan` is the real check, not `validate`
 
@@ -61,7 +108,7 @@ nested blocks**:
 
 So run `plan` against a real account before believing any of it.
 
-## What it creates
+## What deployment creates
 
 | resource | why it looks like that |
 | --- | --- |
@@ -72,6 +119,7 @@ So run `plan` against a real account before believing any of it.
 | `cloudflare_workers_cron_trigger.compact` | `0 5 * * *` |
 | `cloudflare_workers_script_subdomain.compact` | workers.dev route for the manual `POST /compact` trigger |
 | `cloudflare_r2_custom_domain.data` | `data.cratebank.io` → the bucket, **public** |
+| Wrangler `cratebank-site` assets | rendered landing page, served without request-time Worker code |
 
 **The Worker never decodes the body.** It streams `request.body` straight to
 `env.BUCKET.put()`. It requires `content-length` and returns 411 without it, so
@@ -85,24 +133,30 @@ record; declaring one alongside makes them fight over the same hostname.
 blobs included. That is intended — the census is public — but it is not
 reversible for anything already fetched or indexed.
 
+## Worker sources and bundles
+
+The editable page lives in `worker/site.md`, with presentation in
+`worker/site.css` and the document shell in `worker/site.template.html`.
+`build-site.mjs` renders it once to `worker/dist/site/index.html`; Wrangler then
+uploads that directory using `worker/wrangler-site.jsonc`. There is no site
+Worker source and no Markdown rendering on a request.
+
+`worker/dist/compact.js` is the committed bundle Terraform deploys. CI rebuilds
+it and fails on drift. The rendered site directory is ignored and rebuilt in
+GitHub immediately before upload.
+
+Rebuild after editing any Worker source:
+
+```sh
+cd worker && npm ci && npm run build
+```
+
 ## The compaction Worker
 
 `worker/compact.js` reads every session blob nightly and writes
 `units.parquet` and `sessions.parquet` to the bucket root, plus dated copies
 under `snapshots/`. Those are the public interface; the raw blobs are the
 ground truth.
-
-`worker/dist/compact.js` is the esbuild bundle Terraform actually deploys, and
-it **is committed** so a clone without a node toolchain can still apply. CI
-rebuilds it and fails on drift. Two gitignore lines are needed to keep it
-tracked, because a global gitignore may exclude `dist/` and git will not
-descend into an excluded directory to find a re-included file.
-
-Rebuild after editing `compact.js`:
-
-```sh
-cd worker && npm install && npm run build
-```
 
 Trigger it by hand rather than waiting for 05:00 UTC:
 

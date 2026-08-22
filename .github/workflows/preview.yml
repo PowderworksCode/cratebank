@@ -1,0 +1,321 @@
+name: preview
+
+# This file is intentionally triggered only by events that load workflow code
+# from the default branch. Pull-request code cannot weaken the zmaril gate or
+# choose a different credentials-bearing environment.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  approval-request:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.user.login != 'zmaril'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Post revision-bound approval command
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- cratebank-preview-approval -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const sha = context.payload.pull_request.head.sha;
+            const body = `${marker}
+            ## Preview approval required
+
+            Credential-free CI can run normally. To approve the static preview
+            and remote-state OpenTofu plan for this exact revision, @zmaril must
+            comment:
+
+            \`/preview ${sha}\`
+
+            A later push changes the revision and requires a new approval.`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  # zmaril-authored PRs run automatically. For every other author, the
+  # revision-bound `/preview <sha>` comment is the approval record. The
+  # privileged job checks that the approved SHA is still the PR head before it
+  # checks out or executes any pull-request code.
+  preview-plan:
+    if: >-
+      (github.event_name == 'pull_request_target' &&
+       github.event.action != 'closed' &&
+       github.event.pull_request.user.login == 'zmaril') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       github.event.comment.user.login == 'zmaril' &&
+       startsWith(github.event.comment.body, '/preview '))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cratebank-preview-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    environment:
+      name: preview
+      url: ${{ steps.preview.outputs.url }}
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+      TF_IN_AUTOMATION: "true"
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+      TF_VAR_compact_secret: ${{ secrets.COMPACT_SECRET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_ACCESS_KEY }}
+      AWS_ENDPOINT_URL_S3: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      PREVIEW_NAME: cratebank-site-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+
+    steps:
+      - name: Resolve approved revision
+        id: approved
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let sha;
+            let repository;
+            if (context.eventName === 'pull_request_target') {
+              sha = context.payload.pull_request.head.sha;
+              repository = context.payload.pull_request.head.repo.full_name;
+            } else {
+              const match = context.payload.comment.body.match(/^\/preview ([0-9a-f]{40})$/);
+              if (!match) {
+                core.setFailed('Use the exact command posted by the preview approval bot.');
+                return;
+              }
+              sha = match[1];
+              const { data: pull } = await github.rest.pulls.get({
+                ...context.repo,
+                pull_number: Number(process.env.PR_NUMBER)
+              });
+              if (pull.state !== 'open') {
+                core.setFailed('The pull request is not open.');
+                return;
+              }
+              if (pull.head.sha !== sha) {
+                core.setFailed(`Approval is stale: approved ${sha}, current head is ${pull.head.sha}.`);
+                return;
+              }
+              repository = pull.head.repo.full_name;
+            }
+            core.setOutput('sha', sha);
+            core.setOutput('repository', repository);
+
+      - name: Check preview configuration
+        run: |
+          test -n "$PR_NUMBER"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$TF_VAR_zone_id"
+          test -n "$TF_VAR_compact_secret"
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+
+      - name: Check out the approved PR revision
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.approved.outputs.repository }}
+          ref: ${{ steps.approved.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: infra/worker/package-lock.json
+
+      - name: Build Workers and site
+        run: npm ci && npm run build
+        working-directory: infra/worker
+
+      - name: Deploy static preview
+        id: preview
+        working-directory: infra/worker
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          npx wrangler deploy \
+            --config wrangler-site-preview.jsonc \
+            --name "$PREVIEW_NAME"
+          preview_url="$(
+            jq -r 'select(.type == "deploy") | .targets[]? | select(startswith("https://"))' \
+              "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1
+          )"
+          test -n "$preview_url"
+          echo "url=$preview_url" >> "$GITHUB_OUTPUT"
+
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version_file: .opentofu-version
+          tofu_wrapper: false
+
+      - name: Initialize remote state
+        run: tofu init -input=false -backend-config="bucket=cratebank-tofu-state"
+        working-directory: infra
+
+      - name: Make speculative plan
+        id: plan
+        working-directory: infra
+        run: |
+          set +e
+          tofu plan -input=false -no-color -detailed-exitcode \
+            > "${RUNNER_TEMP}/tofu-plan.txt" 2>&1
+          exitcode="$?"
+          set -e
+          cat "${RUNNER_TEMP}/tofu-plan.txt"
+          echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
+
+      - name: Publish preview and plan
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.url }}
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          PLAN_PATH: ${{ runner.temp }}/tofu-plan.txt
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- cratebank-preview-plan -->';
+            const preview = process.env.PREVIEW_URL || 'Preview deployment did not complete.';
+            const exitcode = process.env.PLAN_EXITCODE;
+            const planStatus = exitcode === '0'
+              ? 'No infrastructure changes.'
+              : exitcode === '2'
+                ? 'Infrastructure changes are proposed.'
+                : 'The infrastructure plan failed or did not complete.';
+            let plan = fs.existsSync(process.env.PLAN_PATH)
+              ? fs.readFileSync(process.env.PLAN_PATH, 'utf8')
+              : 'No plan output was produced.';
+            if (plan.length > 50000) {
+              plan = `${plan.slice(0, 50000)}\n\n…output truncated; see the Actions log for the rest.`;
+            }
+            const previewLine = preview.startsWith('https://')
+              ? `[Open the static preview](${preview})`
+              : preview;
+            const approvedBy = context.eventName === 'issue_comment'
+              ? `Revision \`${{ steps.approved.outputs.sha }}\` approved by @zmaril.`
+              : 'Run automatically for a PR authored by @zmaril.';
+            const body = `${marker}
+            ## cratebank preview
+
+            ${previewLine}
+
+            ${approvedBy}
+
+            ## OpenTofu plan
+
+            ${planStatus}
+
+            <details><summary>Plan output</summary>
+
+            \`\`\`hcl
+            ${plan}
+            \`\`\`
+
+            </details>`;
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+            await core.summary
+              .addHeading('cratebank preview')
+              .addLink('Open the static preview', preview.startsWith('https://') ? preview : '#')
+              .addHeading('OpenTofu plan')
+              .addRaw(planStatus)
+              .addCodeBlock(plan, 'hcl')
+              .write();
+
+      - name: Fail if planning failed
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+  cleanup-preview:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    environment: preview
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      PREVIEW_NAME: cratebank-site-pr-${{ github.event.pull_request.number }}
+    steps:
+      - name: Delete static preview
+        run: |
+          status="$(curl --silent --show-error \
+            --output "${RUNNER_TEMP}/delete-preview.json" \
+            --write-out '%{http_code}' \
+            --request DELETE \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${PREVIEW_NAME}")"
+          if [ "$status" = "200" ] || [ "$status" = "404" ]; then
+            echo "Preview ${PREVIEW_NAME} is gone (HTTP ${status})."
+          else
+            cat "${RUNNER_TEMP}/delete-preview.json"
+            exit 1
+          fi
+
+      - name: Mark preview as removed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- cratebank-preview-plan -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body: `${marker}\n## cratebank preview\n\nPreview removed because this pull request is closed.`
+              });
+            }

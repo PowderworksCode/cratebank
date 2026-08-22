@@ -31,16 +31,3 @@ variable "bucket_location" {
   type        = string
   default     = "ENAM"
 }
-
-# Out-of-band R2 access (aws-cli, rclone). The Worker does not use these -- it
-# reaches the bucket through a binding. Kept as variables rather than minted by
-# Terraform so the token that runs this cannot also create credentials.
-variable "r2_access_key_id" {
-  type      = string
-  sensitive = true
-}
-
-variable "r2_secret_access_key" {
-  type      = string
-  sensitive = true
-}
