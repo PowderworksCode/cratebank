@@ -93,10 +93,11 @@ tables:
 - `timeline.parquet` — Cargo concurrency and CPU over time; and
 - `unit_flags.parquet` — resolved compilation settings.
 
-Install persistent DuckDB views, then use the sample queries:
+Install persistent DuckDB views directly from the permanent GitHub URL, then
+use the sample queries:
 
 ```sh
-duckdb cratebank.duckdb < docs/install.sql
+curl -fsSL https://raw.githubusercontent.com/PowderworksCode/cratebank/main/docs/install.sql | duckdb cratebank.duckdb
 duckdb cratebank.duckdb
 ```
 
@@ -112,6 +113,10 @@ The files live at `https://data.cratebank.io/` and need no account or API key.
 The machine-readable table schema is
 `https://data.cratebank.io/schema/v2/tables.json`.
 
+[Download the Python starter notebook](https://raw.githubusercontent.com/PowderworksCode/cratebank/main/docs/cratebank-analysis.ipynb)
+for a guided analysis of sessions, package wall time, compiler phases, build
+settings, and one build timeline.
+
 ## Repository map
 
 - [`cargo-cratebank/`](cargo-cratebank/) — the stable Cargo and samply client
@@ -121,6 +126,7 @@ The machine-readable table schema is
 - [`docs/ingest.md`](docs/ingest.md) — upload, storage, and compaction
 - [`docs/install.sql`](docs/install.sql) — DuckDB view installation
 - [`docs/queries.sql`](docs/queries.sql) — copy-and-paste queries
+- [`docs/cratebank-analysis.ipynb`](docs/cratebank-analysis.ipynb) — Python and DuckDB starter analysis
 - [`infra/`](infra/) — Cloudflare infrastructure and deployment
 
 The landing page is `https://cratebank.io/`; ingest is

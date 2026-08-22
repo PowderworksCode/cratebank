@@ -43,7 +43,16 @@ sampled build, Cargo timing report, and samply profile all parse successfully.
 ## Using the data
 
 Everything is public parquet on R2 — no account, no API key, no egress cost.
-Query it straight from [DuckDB](https://duckdb.org):
+Install persistent views directly from GitHub, then open
+[DuckDB](https://duckdb.org):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/PowderworksCode/cratebank/main/docs/install.sql | duckdb cratebank.duckdb
+duckdb cratebank.duckdb
+```
+
+Or [download the Python starter notebook](https://raw.githubusercontent.com/PowderworksCode/cratebank/main/docs/cratebank-analysis.ipynb)
+for a guided analysis. Once the views are installed, queries are ordinary SQL:
 
 ```sql
 INSTALL httpfs;
