@@ -144,7 +144,19 @@ verbatim under a versioned envelope rather than being normalised client-side.
   the id-array columns that make totals summable with one `unnest`
 - [`docs/capture-manifest.md`](docs/capture-manifest.md) — everything worth
   recording about a build, tagged MUST / RIDE / TGT / DRV
+- [`docs/install.sql`](docs/install.sql) — install DuckDB's HTTP support and
+  create local views over all five public tables
+- [`docs/queries.sql`](docs/queries.sql) — executable sample queries; paste any
+  statement directly into DuckDB after running `install.sql`
 - [`cargo-cratebank/`](cargo-cratebank/) — the client
+
+Create a reusable local DuckDB catalog, then paste any statement from the
+sample file:
+
+```sh
+duckdb cratebank.duckdb < docs/install.sql
+duckdb cratebank.duckdb
+```
 
 ## Status
 
@@ -156,7 +168,7 @@ a ~60-line Cloudflare Worker takes a zstd-compressed session and puts it in R2
 without decoding it, at an endpoint that needs no account to contribute to. The
 bytes the client compresses are the bytes stored are the bytes queried.
 
-A nightly Worker compacts those blobs into two flat parquet tables, so the
+A nightly Worker compacts those blobs into five flat parquet tables, so the
 census is one line and no credentials:
 
 ```sql
@@ -166,4 +178,4 @@ SELECT * FROM 'https://data.cratebank.io/units.parquet';
 R2's zero egress is what makes that a public interface rather than a bill.
 
 Live at `https://ingest.cratebank.io/v1/sessions`; the stack is Terraform in
-`infra/`.
+`infra/`, deployed from GitHub Actions after changes merge to `main`.

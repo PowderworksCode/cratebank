@@ -102,32 +102,14 @@ resource "cloudflare_r2_custom_domain" "data" {
 
 # ── the public face ──────────────────────────────────────────────────────────
 
-# cratebank.io and www: a single inlined page, no assets, no build step. Also
-# answers the bare root of data.cratebank.io, which is an R2 bucket and would
-# otherwise 404 at exactly the hostname people see in a query.
-resource "cloudflare_workers_script" "site" {
-  account_id  = var.account_id
-  script_name = "cratebank-site"
+# The landing page is deployed by GitHub as Workers Static Assets. Stop
+# managing its former request-time script without deleting the service: the
+# first static upload updates that same service in place.
+removed {
+  from = cloudflare_workers_script.site
 
-  content     = file("${path.module}/worker/site.js")
-  main_module = "site.js"
-
-  compatibility_date = "2026-08-21"
-
-  observability = {
-    enabled            = true
-    head_sampling_rate = 1
-    logs = {
-      enabled            = true
-      head_sampling_rate = 1
-      invocation_logs    = true
-      persist            = true
-    }
-    traces = {
-      enabled            = false
-      head_sampling_rate = 1
-      persist            = true
-    }
+  lifecycle {
+    destroy = false
   }
 }
 
@@ -140,7 +122,7 @@ resource "cloudflare_workers_custom_domain" "site" {
   account_id = var.account_id
   zone_id    = var.zone_id
   hostname   = each.value
-  service    = cloudflare_workers_script.site.script_name
+  service    = "cratebank-site"
 }
 
 # data.cratebank.io is an R2 custom domain, so R2 answers every path on it --
@@ -152,5 +134,5 @@ resource "cloudflare_workers_route" "data_root" {
 
   zone_id = var.zone_id
   pattern = "data.${var.zone_name}/"
-  script  = cloudflare_workers_script.site.script_name
+  script  = cloudflare_workers_script.ingest.script_name
 }

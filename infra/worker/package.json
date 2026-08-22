@@ -3,13 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild compact.js --bundle --format=esm --minify --outfile=dist/compact.js"
+    "build": "npm run build:compact && npm run build:site",
+    "build:compact": "esbuild compact.js --bundle --format=esm --minify --outfile=dist/compact.js",
+    "build:site": "node build-site.mjs"
   },
   "dependencies": {
     "fzstd": "^0.1.1",
     "hyparquet-writer": "^0.16.6"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "marked": "^18.0.10",
+    "wrangler": "^4.125.0"
   }
 }

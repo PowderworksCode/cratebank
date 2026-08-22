@@ -1,11 +1,27 @@
 # cratebank ingest, as infrastructure.
 #
-# One R2 bucket, one Worker, and a custom domain so the client never learns
-# Cloudflare's hostname. The Worker is worker/ingest.js -- it puts the request
-# body in R2 without decoding it, and that is the whole ingest.
+# One R2 data bucket, two request-time Workers, static landing-page assets,
+# their routes, and a nightly cron. The ingest Worker puts request bodies in R2
+# without decoding them; the compactor rebuilds the public parquet tables.
 
 terraform {
   required_version = ">= 1.6"
+
+  # The bucket and R2 endpoint are supplied by GitHub Actions (and during the
+  # one-time migration) so credentials and account-specific values never land
+  # in this file. State belongs in a private bucket, never the public data
+  # bucket: it contains the compactor's secret binding.
+  backend "s3" {
+    key                         = "cratebank/terraform.tfstate"
+    region                      = "auto"
+    skip_credentials_validation = true
+    skip_metadata_api_check     = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_s3_checksum            = true
+    use_path_style              = true
+  }
+
   required_providers {
     cloudflare = {
       source = "cloudflare/cloudflare"

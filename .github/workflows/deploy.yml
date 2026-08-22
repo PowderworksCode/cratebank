@@ -1,0 +1,76 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deploy.yml
+      - .opentofu-version
+      - "infra/**"
+  workflow_dispatch:
+
+concurrency:
+  group: cratebank-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  production:
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      TF_IN_AUTOMATION: "true"
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+      TF_VAR_compact_secret: ${{ secrets.COMPACT_SECRET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_ACCESS_KEY }}
+      AWS_ENDPOINT_URL_S3: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deployment configuration
+        run: |
+          test -n "$TF_VAR_account_id"
+          test -n "$TF_VAR_zone_id"
+          test -n "$TF_VAR_cloudflare_api_token"
+          test -n "$TF_VAR_compact_secret"
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: infra/worker/package-lock.json
+
+      - name: Build Workers and site
+        run: npm ci && npm run build
+        working-directory: infra/worker
+
+      - name: Upload static site
+        run: npx wrangler deploy --config wrangler-site.jsonc
+        working-directory: infra/worker
+
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version_file: .opentofu-version
+          tofu_wrapper: false
+
+      - name: Initialize remote state
+        run: tofu init -input=false -backend-config="bucket=cratebank-tofu-state"
+
+      - name: Plan
+        run: tofu plan -input=false -out=deploy.tfplan
+
+      - name: Apply
+        run: tofu apply -input=false deploy.tfplan

@@ -4,12 +4,13 @@
 .wrangler/
 node_modules/
 
-# infra/worker/dist/compact.js is a build artifact but is committed on purpose:
-# Terraform reads it with file(), so a clone without a node toolchain must still
-# be able to `tofu apply`. CI rebuilds it and fails if it drifts from source.
+# Worker bundles are build artifacts but are committed on purpose: Terraform
+# reads them with file(), so a clone can still plan without a node toolchain.
+# CI rebuilds them and fails if either drifts from its source.
 #
 # Both lines are needed. A global gitignore here has `dist/`, and git will not
 # descend into an excluded *directory* to find a re-included file -- so the
 # directory has to be un-ignored before the file can be.
 !infra/worker/dist/
+infra/worker/dist/*
 !infra/worker/dist/compact.js
