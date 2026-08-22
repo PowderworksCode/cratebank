@@ -336,19 +336,17 @@ whether the data is queryable.
 
 **zstd because DuckDB reads it natively.** `read_json_auto()` decompresses
 zstd (and gzip) transparently, so an uploaded session is queryable the moment it
-lands, with no conversion step. brotli compresses better and was the original
-choice, but DuckDB cannot read it at all — a brotli blob in R2 is opaque until
-something rewrites it.
+lands, with no conversion step. DuckDB cannot read brotli, so brotli blobs
+would require a separate rewrite before querying.
 
 ```
 sent …: 91 events, 43 units (11 withheld), 2 KB zstd from 25 KB -> …
 ```
 
-The `zstd` crate binds C, unlike the pure-Rust brotli crate it replaced. That is
-only acceptable because `ring` — via `ureq` → `rustls` for TLS — already
-requires a C toolchain to build this crate at all, so it adds no new
-requirement. It would become one if the TLS stack were ever swapped for a
-pure-Rust provider: there is no pure-Rust zstd *encoder*.
+The `zstd` crate binds C. `ring` — via `ureq` → `rustls` for TLS — also requires
+a C toolchain, so zstd adds no separate toolchain requirement. A TLS stack
+without a C dependency would make zstd the remaining blocker because there is
+no pure-Rust zstd encoder.
 
 No negotiation and no fallback. A send that fails is simply not recorded as
 sent, so the session stays queued and goes out next time — a failed upload

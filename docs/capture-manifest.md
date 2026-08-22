@@ -4,9 +4,7 @@
 around the whole build, and `cargo build --timings`.** Both work on stable, on
 any rustc version, and neither sits in the compile path, so neither collides
 with a contributor's `sccache`. Fields that need a nightly `-Z` flag, a rustc
-wrapper, or an extra build are listed at the end as out of scope, with what
-each would have bought — deleting them would only invite someone to re-derive
-the same dead ends.
+wrapper, or an extra build are listed as unsupported measurements.
 
 The archival round is only one-time if nothing forces a redo, so within that
 scope this list errs exhaustive. Archive classes: **MUST** (analysis depends on
@@ -43,7 +41,7 @@ project view, `era` = one archival round.
 | whole-build CPU curve | **--timings** `CPU_USAGE` | MUST |
 | blocked time per unit (thread parked, burning no CPU) | **sampler** — leaf frame in a wait syscall; a bucket of its own, never folded into a phase | MUST |
 | `-j`, jobs in flight | **--timings** concurrency + rustc argv | MUST |
-| max RSS, faults, context switches, fs in/out | ~~shim rusage~~ **not captured** — needs `wait4` around each rustc, which is the wrapper this design removed | — |
+| max RSS, faults, context switches, fs in/out | **not captured** — needs `wait4` around each rustc, which requires an incompatible rustc wrapper | — |
 | exit code, warning count, stderr on failure | **not captured** — see *What these two instruments cannot give* | — |
 
 ## C. Phase decomposition (class)
@@ -136,9 +134,8 @@ an API.
   is what makes "same class, new compiler, what moved?" a query rather than a
   project.
 
-How and when that data is aggregated, compacted or released is deliberately not
-specified here. It depends on what the data turns out to look like, and
-committing to a shape now would only constrain a decision better made later.
+Aggregation and release use the current parquet schema described in
+`docs/schema.md`; the raw session blobs remain the re-runnable source of truth.
 
 ## The two instruments
 
@@ -160,16 +157,11 @@ the session log already give, which is the point: two independent measurements
 of per-unit wall that can be cross-checked. What only it provides is
 `CONCURRENCY_DATA` — how many units were ready-but-blocked versus running.
 
-A rustc wrapper was the intended instrument for years of this document and was
-abandoned after measuring it. `RUSTC_WRAPPER` **overrides**
-`build.rustc-wrapper` rather than stacking with it, so it silently evicts a
-contributor's `sccache` and doubles their build — the study's TRAP 1,
-reappearing as its own proposed fix.
+No cratebank component sets `RUSTC_WRAPPER`. Cargo's `RUSTC_WRAPPER` overrides
+`build.rustc-wrapper` rather than stacking with it, so using one would evict a
+contributor's configured `sccache`.
 
-## What these two instruments cannot give
-
-Recorded so the same ground is not re-covered. Each was measured before being
-ruled out.
+## Unsupported measurements
 
 | wanted | needs | why not |
 | --- | --- | --- |
@@ -180,18 +172,4 @@ ruled out.
 | max RSS, faults, context switches | `wait4` around each rustc | requires the wrapper, which evicts sccache |
 | exit code, warning count, stderr | wrapping rustc, or parsing cargo's JSON | wrapper; cargo's `--message-format=json` could reach the warnings |
 | LLVM pass statistics, IR lines | `-Cllvm-args=-stats`, `cargo llvm-lines` | perturbs, or needs a separate build |
-| licenses, workspace members | `cargo metadata` | cheap, just not one of these two instruments |
-
-Two near-misses worth knowing about, both measured:
-
-- **`RUSTC_LOG` works on release rustc**, but `max_level_info` compiles DEBUG
-  and TRACE out, so the phase spans do not exist. 51,727 span records on one
-  crate, **zero** with a non-zero duration, at +72% build time. The counts
-  (37,242 normalizations, 3,200 coercions) are real and machine-independent,
-  and are the one thing here worth revisiting.
-- **Artifact mtimes** give parse/expand, analysis and codegen boundaries for
-  free on every platform, by timestamping the files rustc writes. They cannot
-  split the frontend, which is 80% of compile time on some crates. Extra
-  `--emit` kinds (+119%) and `-Csave-temps` (+83%) buy backend detail that is
-  not worth it; both look free measured on a single unit, and that measurement
-  is wrong.
+| licenses, workspace members | `cargo metadata` | not provided by the two capture instruments |

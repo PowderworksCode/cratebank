@@ -7,10 +7,10 @@
 terraform {
   required_version = ">= 1.6"
 
-  # The bucket and R2 endpoint are supplied by GitHub Actions (and during the
-  # one-time migration) so credentials and account-specific values never land
-  # in this file. State belongs in a private bucket, never the public data
-  # bucket: it contains the compactor's secret binding.
+  # The bucket and R2 endpoint are supplied by GitHub Actions so credentials
+  # and account-specific values never land in this file. State belongs in a
+  # private bucket, never the public data bucket: it contains the compactor's
+  # secret binding.
   backend "s3" {
     key                         = "cratebank/terraform.tfstate"
     region                      = "auto"
@@ -45,13 +45,10 @@ resource "cloudflare_r2_bucket" "cratebank" {
   location   = var.bucket_location
 }
 
-# ── the Worker that replaced the stream ──────────────────────────────────────
+# ── ingest Worker ────────────────────────────────────────────────────────────
 
-# Pipelines capped a request at 5 MB and each message at 1 MB, and the client
-# sends one object per session -- so the 1 MB cap was the binding one, roughly
-# a third of what a large build produces. A Worker's ceiling is the plan's
-# request-body limit (100 MB on Free/Pro), which removes the batching problem
-# rather than working around it.
+# The client sends one object per session. The request ceiling is the zone's
+# request-body limit (100 MB on Free/Pro).
 #
 # The script never decompresses or parses the body; it streams the bytes to R2
 # unchanged. See worker/ingest.js.
@@ -75,7 +72,7 @@ resource "cloudflare_workers_script" "ingest" {
   # Declared in full, not just `enabled = true`. These sub-fields are
   # optional+computed: the server fills in whatever is omitted, and Terraform
   # then reads the difference as a removal and re-uploads the script on every
-  # single plan. Same shape of trap as a stream's server-generated schema.
+  # plan.
   observability = {
     enabled            = true
     head_sampling_rate = 1
