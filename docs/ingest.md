@@ -5,7 +5,7 @@ The ingest path is deliberately small:
 ```text
 cargo-cratebank --POST zstd blob--> Worker --put()--> r2://cratebank/sessions/year=/month=/day=/*.json.zst
                                                     |
-                                                    +--> nightly compactor --> public parquet
+                                                    +--> daily compactor --> public parquet
 ```
 
 The Worker does not decompress, parse, validate, or interpret the body. The
@@ -34,8 +34,8 @@ request directly to the R2 `BUCKET` binding. A successful response is:
 {"success":true,"key":"sessions/year=2026/month=08/day=22/<uuid>.json.zst"}
 ```
 
-The client marks a session sent only after a successful response. A failed
-request remains queued for retry.
+The command succeeds only after a successful response. A failed upload exits
+with an error.
 
 `GET` and `HEAD` requests redirect to `https://cratebank.io/`. `/v1/sessions`
 is the version boundary for the payload contract.
@@ -56,8 +56,6 @@ This has direct analytical consequences:
   ingestion.
 
 Do not put an account-level Cloudflare or R2 credential in the public client.
-Any future authentication belongs at the Worker boundary and must use
-per-contributor, revocable credentials.
 
 ## Stored payload
 
@@ -72,11 +70,10 @@ The Hive-style date partitions let credentialed S3 clients prune raw objects
 by date. Listing raw objects requires R2 credentials, even though known object
 URLs are publicly readable through `data.cratebank.io`.
 
-The client sends compact JSON compressed with zstd level 19. DuckDB reads zstd
-JSON natively, so the raw object is queryable without a conversion step. The
-client does not batch, negotiate codecs, slim events, or emit parquet. Cargo's
-event payload stays verbatim under the cratebank session header so changes in
-Cargo's schema can be handled during compaction.
+The client sends schema-2 JSON compressed with zstd level 19. DuckDB reads
+zstd JSON natively, so the raw object is queryable without a conversion step.
+The payload contains the parsed Cargo timing report, parsed samply phase data,
+and their shared build context. The client does not batch or negotiate codecs.
 
 The request-size ceiling is the Cloudflare zone's request-body limit: 100 MB
 on Free and Pro, 200 MB on Business, and 500 MB on Enterprise. The Worker
@@ -96,7 +93,7 @@ the public parquet tables at fixed URLs:
 | `unit_flags.parquet` | resolved setting and compilation unit |
 
 The schema is published at
-`https://data.cratebank.io/schema/v1/tables.json`. Dated copies are stored
+`https://data.cratebank.io/schema/v2/tables.json`. Dated copies are stored
 under `snapshots/`.
 
 The fixed public URLs require no R2 credentials:
@@ -112,20 +109,19 @@ GROUP BY 1, 2
 ORDER BY 3 DESC;
 ```
 
-The compactor joins related Cargo events by unit index, coerces drifting input
-fields at the table boundary, and writes the schema alongside the tables.
-Workers use the bundled `fzstd` decoder and `hyparquet-writer`.
+The compactor maps Cargo timing units, samply phases, and Cargo timeline points
+into public tables, coerces input fields at the table boundary, and writes the
+schema alongside the tables. Workers use the bundled `fzstd` decoder and
+`hyparquet-writer`.
 
-Compaction is currently a full rebuild and holds its output rows in memory.
-The practical ceiling is roughly 10,000 sessions under the Worker's 128 MB
-limit. Monitor the `objects` and `bytes_in` cron metrics. When the dataset
-approaches that ceiling, compact per day and merge only uncompacted partitions.
+Compaction is a full rebuild and holds its output rows in memory. Monitor the
+`objects` and `bytes_in` cron metrics against the Worker's 128 MB limit.
 
 ## Cost and abuse controls
 
 Storage traffic has no egress charge. Variable cost is primarily R2 storage,
 one Class A `PutObject` per submission, and the Class B reads performed by the
-nightly full rebuild. Operations scale with the number of sessions rather than
+daily full rebuild. Operations scale with the number of sessions rather than
 their compressed size.
 
 The public endpoint relies on Cloudflare WAF rate limiting by IP. Treat all

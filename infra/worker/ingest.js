@@ -1,11 +1,8 @@
 // cratebank ingest: take a blob, put it in R2. That is the whole program.
 //
 // It does not decompress, parse, validate or interpret the body. The client
-// uploads a zstd-compressed session and those exact bytes land in R2, where
-// DuckDB reads them natively -- so there is no conversion step between
-// contribution and query, and nothing here can drop a row by misunderstanding
-// it. "Capture generously, model nothing at ingest", enforced by having no
-// code that could do otherwise.
+// uploads a zstd-compressed session and those exact bytes land in R2. The
+// compactor reads those objects to produce the public parquet tables.
 // The request ceiling is the zone's request-body size (100 MB on Free/Pro).
 
 const PATH = "/v1/sessions";
@@ -60,8 +57,8 @@ export default {
         httpMetadata: { contentType: "application/zstd" },
       });
     } catch (e) {
-      // Report the failure rather than swallowing it: the client only marks a
-      // session sent on a 2xx, so a 5xx means it stays queued and retries.
+      // Report the failure rather than swallowing it. The client exits with an
+      // error unless the upload receives a successful response.
       return json({ success: false, error: `r2 put failed: ${e}` }, 500);
     }
 

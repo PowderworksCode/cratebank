@@ -5,7 +5,8 @@
   "scripts": {
     "build": "npm run build:compact && npm run build:site",
     "build:compact": "esbuild compact.js --bundle --format=esm --minify --outfile=dist/compact.js",
-    "build:site": "node build-site.mjs"
+    "build:site": "node build-site.mjs",
+    "test": "node --test compact.test.mjs"
   },
   "dependencies": {
     "fzstd": "^0.1.1",

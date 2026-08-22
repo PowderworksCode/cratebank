@@ -99,7 +99,7 @@ reliably validate every provider-specific nested block. Treat the remote-state
 | `cloudflare_r2_bucket` | storage; zero egress is what makes a public query surface affordable |
 | `cloudflare_workers_script.ingest` | the ingest Worker, with an R2 binding named `BUCKET` |
 | `cloudflare_workers_custom_domain.ingest` | `ingest.cratebank.io` → the Worker; skipped if `zone_id` is empty |
-| `cloudflare_workers_script.compact` | nightly compaction to public parquet (`compact.tf`) |
+| `cloudflare_workers_script.compact` | daily compaction to public parquet (`compact.tf`) |
 | `cloudflare_workers_cron_trigger.compact` | `0 5 * * *` |
 | `cloudflare_workers_script_subdomain.compact` | workers.dev route for the manual `POST /compact` trigger |
 | `cloudflare_r2_custom_domain.data` | `data.cratebank.io` → the bucket, **public** |
@@ -137,7 +137,7 @@ cd worker && npm ci && npm run build
 
 ## The compaction Worker
 
-`worker/compact.js` reads every session blob nightly and writes
+`worker/compact.js` reads every session blob daily and writes
 `sessions.parquet`, `units.parquet`, `phases.parquet`, `timeline.parquet`, and
 `unit_flags.parquet` to the bucket root, plus dated copies under `snapshots/`.
 Those files are the public interface; the raw blobs are the ground truth.
@@ -149,10 +149,8 @@ curl -X POST "https://cratebank-compact.<subdomain>.workers.dev/compact" \
   -H "authorization: Bearer $compact_secret"
 ```
 
-It is a full rebuild holding every row in memory, which is free now and will
-not be — the ceiling is the Worker's 128 MB, roughly 10k sessions. Watch
-`objects` and `bytes_in` in the cron logs; the fix when it arrives is per-day
-compaction, which the hive key layout already supports.
+It is a full rebuild holding every row in memory. The ceiling is the Worker's
+128 MB, roughly 10k sessions. Watch `objects` and `bytes_in` in the cron logs.
 
 ## Provider drift
 

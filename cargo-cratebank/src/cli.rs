@@ -12,7 +12,7 @@ pub const DEFAULT_ENDPOINT: &str = "https://ingest.cratebank.io/v1/sessions";
 #[command(
     name = "cargo-cratebank",
     version,
-    about = "Share the Rust build timings you were already producing"
+    about = "Measure a Rust build with Cargo timings and samply"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -23,7 +23,7 @@ pub struct Cli {
 
 #[derive(Args, Debug, Clone)]
 pub struct Common {
-    /// Where to POST sessions
+    /// Where to POST build observations
     #[arg(long, global = true, env = "CRATEBANK_ENDPOINT", default_value = DEFAULT_ENDPOINT)]
     pub endpoint: String,
     /// Print the exact payload and send nothing
@@ -33,45 +33,19 @@ pub struct Common {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// Opt this project in to automatic sending
-    Enable,
-    /// Ship every completed session from any opted-in workspace (background)
-    Watch,
-    /// Build with cargo's analysis flags enabled, then send
+    /// Build under samply with Cargo timings enabled, then send
     Build {
         /// Arguments passed through to `cargo build`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Send session logs from builds that already happened
-    Send(SendArgs),
-    /// Show whether everything is wired up
+    /// Show whether required tools are available
     Status,
     /// Run a local echo collector (for testing)
     Serve {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
-    /// Internal: used by the build.rs trigger
-    #[command(hide = true)]
-    Autosend {
-        /// Re-spawn detached and return immediately
-        #[arg(long)]
-        detach: bool,
-    },
-}
-
-#[derive(Args, Debug, Default)]
-pub struct SendArgs {
-    /// Send every unsent session
-    #[arg(long)]
-    pub all: bool,
-    /// Send one session by id (or a unique fragment of it)
-    #[arg(long)]
-    pub session: Option<String>,
-    /// Send the N most recent sessions
-    #[arg(long, default_value_t = 1)]
-    pub since: usize,
 }
 
 impl Cli {
@@ -89,11 +63,4 @@ pub fn cargo_home() -> PathBuf {
     std::env::var("CARGO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo"))
-}
-
-/// CRATEBANK_DEBUG=1 explains why a send did or did not happen.
-pub fn dbg(msg: &str) {
-    if std::env::var("CRATEBANK_DEBUG").is_ok() {
-        eprintln!("cratebank[autosend] {msg}");
-    }
 }

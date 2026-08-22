@@ -7,21 +7,12 @@
 //!
 //! Nothing wraps rustc. `--include-args` puts the full rustc command line in
 //! the profile's `processName`, so a unit's identity is already in the data --
-//! no `RUSTC_WRAPPER`, no sidecar files, and a contributor's `sccache` keeps
-//! working untouched.
+//! no `RUSTC_WRAPPER` or compiler event hook, and a contributor's `sccache`
+//! keeps working untouched.
 //!
-//! Why this rather than the alternatives, all of which were measured:
-//!
-//! - `-Ztime-passes` gives 57 named passes but needs nightly.
-//! - `-Zself-profile` is finer still and produces 14 MB per *small* build.
-//! - `RUSTC_LOG` has no usable timings: release rustc compiles out DEBUG and
-//!   TRACE, so the phase spans do not exist, and it costs +72% to collect.
-//! - cargo's `--timings` and artifact mtimes give frontend/codegen for free but
-//!   cannot split the frontend, which is 80% of the time on some crates.
-//!
-//! Sampling is the only one that is stable, version-independent, and detailed.
-//! Validated against nightly `-Ztime-passes` on a real crate at
-//! `-Ccodegen-units=1`: every phase within ~1 point.
+//! Cargo `--timings` supplies wall-clock unit and section measurements; samply
+//! supplies the CPU-weighted compiler-phase breakdown. Both are required and
+//! are captured from the same build.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,8 +29,8 @@ use serde_json::{json, Value};
 /// Two names are mapped to rustc's own vocabulary rather than the crate that
 /// implements them, because that is what they mean:
 ///   - `type_check` is `rustc_hir_analysis`, which *encloses* `rustc_hir_typeck`
-///   - `borrowck` includes the MIR pipeline it drives (drop elaboration, const
-///     checking) -- `-Ztime-passes` reports those as one span
+///   - `borrowck` includes the MIR pipeline it drives (drop elaboration and
+///     const checking)
 const MARKERS: &[(&str, &[&str])] = &[
     ("macro_expand", &["rustc_expand::"]),
     ("resolve", &["rustc_resolve::"]),
@@ -65,6 +56,8 @@ pub struct UnitPhases {
     /// Package this unit belongs to. Distinguishes the many build scripts,
     /// all of which are named `build_script_build`.
     pub package: String,
+    /// Source file used only for local privacy classification; never serialized.
+    pub source_path: Option<PathBuf>,
     /// Resolved compilation settings: opt-level, debuginfo, codegen-units,
     /// panic, lto, edition, target, features. Scrubbed of paths.
     pub flags: BTreeMap<String, String>,
@@ -149,6 +142,7 @@ pub struct UnitId {
     /// Package directory for registry crates (`proc-macro2-1.0.107`), else the
     /// crate name. What a human wants when the crate name is a build script.
     pub package: String,
+    pub source_path: Option<PathBuf>,
     /// Resolved compilation settings, scrubbed of paths.
     pub flags: BTreeMap<String, String>,
 }
@@ -211,6 +205,7 @@ fn unit_of(process_name: &str) -> Option<UnitId> {
         crate_type: kind.unwrap_or_else(|| "lib".into()),
         metadata,
         package,
+        source_path: src.map(PathBuf::from),
         flags: build_flags(&argv),
     })
 }
@@ -425,6 +420,7 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
             crate_name: unit.crate_name.clone(),
             crate_type: unit.crate_type.clone(),
             package: unit.package.clone(),
+            source_path: unit.source_path.clone(),
             flags: unit.flags.clone(),
             ..Default::default()
         });
@@ -445,8 +441,8 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
         for s in t["samples"]["stack"].as_array().into_iter().flatten() {
             let Some(mut node) = s.as_u64() else { continue };
             // Walk leaf -> root collecting names, then take the OUTERMOST
-            // phase marker: that is the enclosing phase, which is what
-            // `-Ztime-passes` reports. The innermost marker answers a
+            // phase marker: that is the enclosing compiler phase. The
+            // innermost marker answers a
             // different question (which subsystem the CPU was in) and is a
             // deliberate choice left to the reader, not baked in here.
             let mut chain: Vec<&str> = Vec::new();
@@ -590,8 +586,7 @@ mod tests {
     fn maps_symbols_to_the_phase_rustc_calls_them() {
         assert_eq!(phase_of("rustc_expand::mbe::expand"), Some("macro_expand"));
         assert_eq!(phase_of("rustc_borrowck::mir_borrowck"), Some("borrowck"));
-        // hir_analysis encloses typeck, and -Ztime-passes calls the pair
-        // `type_check_crate`
+        // hir_analysis encloses typeck, so both map to type_check
         assert_eq!(
             phase_of("rustc_hir_analysis::check_crate"),
             Some("type_check")

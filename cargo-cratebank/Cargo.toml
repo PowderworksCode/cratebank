@@ -2,7 +2,7 @@
 name = "cargo-cratebank"
 version = "0.1.0"
 edition = "2021"
-description = "Share the Rust build timings you were already producing (opt-in)"
+description = "Measure a Rust build with Cargo timings and samply"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -12,16 +12,7 @@ path = "src/main.rs"
 [dependencies]
 serde_json = "1"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-# zstd: brotli-class ratios, and DuckDB decompresses it natively -- so a raw
-# uploaded blob is directly queryable from R2 with no conversion step. brotli
-# is NOT readable by DuckDB (verified), which is why it lost.
-#
-# This is a C dependency (zstd-sys, built via `cc`), which is only acceptable
-# because `ring` -- pulled in by ureq -> rustls for TLS -- already requires a C
-# toolchain to build this crate at all. If the TLS provider is ever swapped for
-# a pure-Rust one, this becomes the blocker: there is no pure-Rust zstd
-# *encoder* (ruzstd decodes only). Make that a deliberate choice, not a
-# surprise.
+# The Worker stores uploads byte-for-byte, and DuckDB reads zstd JSON directly.
 zstd = "0.13"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
