@@ -38,23 +38,33 @@ jobs:
       - run: cargo check --all-targets
         working-directory: cargo-cratebank
 
-  # End to end without Cloudflare: the client posts a real payload to the
-  # reference collector, brotli and all.
+  # End to end on stable: samply and Cargo timings are parsed into one payload,
+  # compressed, posted, decoded, and summarized by the reference collector.
   roundtrip:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: allow perf events
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.perf_event_mlock_kb=2048 || true
+      - run: cargo install samply --locked
       - run: cargo build --release
         working-directory: cargo-cratebank
       - name: post a session to the reference collector
         run: |
+          set -o pipefail
           BIN=cargo-cratebank/target/release/cargo-cratebank
-          "$BIN" cratebank serve --port 8787 & sleep 2
-          cargo new --lib /tmp/probe && cd /tmp/probe
-          "$OLDPWD/$BIN" cratebank status
-          cd "$OLDPWD"
-          test -x "$BIN"
+          "$BIN" cratebank serve --port 8787 2> /tmp/cratebank-collector.log &
+          sleep 2
+          CARGO_TARGET_DIR=/tmp/cratebank-roundtrip-target \
+            "$BIN" --endpoint http://127.0.0.1:8787/ingest build \
+            --manifest-path cargo-cratebank/Cargo.toml | tee /tmp/cratebank-send.log
+          grep -Eq 'sent .*: [1-9][0-9]* timing units .* [1-9][0-9]* sampled units' \
+            /tmp/cratebank-send.log
+          grep -Eq '\[ingest\] zstd run .* [1-9][0-9]* timing units .* [1-9][0-9]* sampled units' \
+            /tmp/cratebank-collector.log
 
   terraform:
     runs-on: ubuntu-latest
@@ -87,6 +97,8 @@ jobs:
         with: { node-version: '22' }
       - run: npm ci
         working-directory: infra/worker
+      - run: npm test
+        working-directory: infra/worker
       - run: npm run build
         working-directory: infra/worker
       - name: build outputs are valid
@@ -95,42 +107,6 @@ jobs:
           test -s dist/site/index.html
           grep -q '<h1>cratebank</h1>' dist/site/index.html
         working-directory: infra/worker
-
-  # Sampling is how phases are measured, so prove it works on a runner rather
-  # than only on a laptop. Linux only, deliberately: on macOS samply injects a
-  # preload dylib into every child, and hosted arm64e runners reject it --
-  # every build script dies with SIGABRT. That is why the client treats a
-  # failed sampler as a loud warning and re-runs the build plainly.
-  sampling:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: allow perf events
-        run: |
-          sudo sysctl kernel.perf_event_paranoid=1
-          sudo sysctl kernel.perf_event_mlock_kb=2048 || true
-      - run: cargo install samply --locked
-      - name: sample a real build
-        working-directory: cargo-cratebank
-        run: |
-          samply record --save-only --unstable-presymbolicate --include-args \
-            -o /tmp/p.json --rate 999 -- cargo build
-      - name: the profile must attribute samples to units
-        run: |
-          python3 - <<'EOF'
-          import json, re
-          d = json.load(open('/tmp/p.json'))
-          n = sum(len(t['samples'].get('time') or []) for t in d['threads'])
-          units = [t for t in d['threads'] if '--crate-name' in (t.get('processName') or '')]
-          sy = json.load(open('/tmp/p.syms.json'))
-          crates = {m.group(1) for s in sy['string_table']
-                    for m in [re.match(r'^(rustc_[a-z_]+)::', str(s))] if m}
-          print(f"samples={n} unit-threads={len(units)} rustc-crates={len(crates)}")
-          assert n > 0, "no samples"
-          assert units, "--include-args exposed no rustc command lines"
-          assert crates, "no rustc symbols resolved"
-          EOF
 
   straitjacket:
     runs-on: ubuntu-latest

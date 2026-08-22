@@ -1,7 +1,7 @@
 # cratebank ingest, as infrastructure.
 #
 # One R2 data bucket, two request-time Workers, static landing-page assets,
-# their routes, and a nightly cron. The ingest Worker puts request bodies in R2
+# their routes, and a daily cron. The ingest Worker puts request bodies in R2
 # without decoding them; the compactor rebuilds the public parquet tables.
 
 terraform {

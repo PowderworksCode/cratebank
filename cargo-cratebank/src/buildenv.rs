@@ -1,7 +1,7 @@
-//! Build configuration that cargo's session log does not record: `RUSTFLAGS`,
+//! Build configuration attached to the timing and sampling data: `RUSTFLAGS`,
 //! the linker, and any compiler wrapper.
 //!
-//! These matter — `-C target-cpu`, `-C lto`, `-Zthreads`, lld vs mold vs the
+//! These matter — `-C target-cpu`, `-C lto`, lld vs mold vs the
 //! default linker all move compile time, and a census that cannot see them
 //! cannot answer its own headline questions. They also live in environment
 //! variables and config files that can contain local paths, so this module
@@ -10,7 +10,7 @@
 //!
 //! | shape | treatment |
 //! | --- | --- |
-//! | `-C opt-level=2`, `-Zthreads=8`, `-C target-cpu=native` | kept verbatim |
+//! | `-C opt-level=2`, `-C target-cpu=native` | kept verbatim |
 //! | `-C linker=/usr/bin/clang` | basename only → `clang` |
 //! | any value containing a path separator | value replaced with `<path>` |
 //! | `--remap-path-prefix=…` | dropped entirely (paths on both sides) |
@@ -19,8 +19,6 @@
 //! The rule of thumb: flag *names* and non-path values are build configuration
 //! and are the point of collecting this; anything path-shaped is somebody's
 //! filesystem and never leaves the machine.
-use std::process::Command;
-
 use serde_json::{json, Map, Value};
 
 /// Environment variables we are willing to look at, by exact name.
@@ -79,7 +77,7 @@ pub fn sanitize_flag(tok: &str) -> Option<String> {
 }
 
 /// Flags whose value is the *next* token when written with a space.
-const TAKES_VALUE: &[&str] = &["-C", "-Z", "-L", "-l", "--cfg", "--extern", "--edition"];
+const TAKES_VALUE: &[&str] = &["-C", "-L", "-l", "--cfg", "--extern", "--edition"];
 
 fn split_flags(raw: &str, encoded: bool) -> Vec<String> {
     let toks: Vec<String> = if encoded {
@@ -105,56 +103,7 @@ fn split_flags(raw: &str, encoded: bool) -> Vec<String> {
     out
 }
 
-/// Whitelisted keys from cargo's *resolved* config — better than reading
-/// config files ourselves, because cargo has already merged every layer.
-fn cargo_config(dir: &std::path::Path) -> Map<String, Value> {
-    let mut out = Map::new();
-    let Ok(o) = Command::new("cargo")
-        .args(["config", "get", "-Zunstable-options"])
-        .current_dir(dir)
-        .output()
-    else {
-        return out;
-    };
-    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-    if stdout.trim().is_empty() {
-        return config_from_files(dir);
-    }
-    for line in stdout.lines() {
-        let Some((k, v)) = line.split_once(" = ") else {
-            continue;
-        };
-        let (k, v) = (k.trim(), v.trim().trim_matches('"'));
-        let keep = match k {
-            "build.incremental" | "build.target" | "build.jobs" => Some(v.to_string()),
-            "build.rustc-wrapper" | "build.rustc-workspace-wrapper" => program_name(v),
-            _ if k.starts_with("target.") && k.ends_with(".linker") => program_name(v),
-            _ if k == "build.rustflags"
-                || (k.starts_with("target.") && k.ends_with(".rustflags")) =>
-            {
-                let flags: Vec<Value> = split_flags(
-                    v.trim_matches(['[', ']']).replace([',', '"'], " ").as_str(),
-                    false,
-                )
-                .iter()
-                .filter_map(|f| sanitize_flag(f))
-                .map(Value::from)
-                .collect();
-                out.insert(k.to_string(), Value::Array(flags));
-                continue;
-            }
-            _ => None,
-        };
-        if let Some(val) = keep {
-            out.insert(k.to_string(), Value::from(val));
-        }
-    }
-    out
-}
-
-/// `cargo config get` is nightly-only and the client may be run under stable,
-/// so fall back to the same whitelist applied to the config files directly:
-/// the workspace's `.cargo/config.toml` and `$CARGO_HOME/config.toml`.
+/// Apply the whitelist to workspace and user Cargo configuration files.
 fn config_from_files(dir: &std::path::Path) -> Map<String, Value> {
     let mut out = Map::new();
     let files = [
@@ -202,7 +151,7 @@ fn config_from_files(dir: &std::path::Path) -> Map<String, Value> {
     out
 }
 
-/// The build-configuration block attached to every session.
+/// The build-configuration block attached to every observation.
 pub fn snapshot(dir: &std::path::Path) -> Value {
     let mut env = Map::new();
     for key in ENV_ALLOW {
@@ -226,7 +175,7 @@ pub fn snapshot(dir: &std::path::Path) -> Value {
         };
         env.insert(key.to_string(), value);
     }
-    json!({ "env": env, "config": cargo_config(dir) })
+    json!({ "env": env, "config": config_from_files(dir) })
 }
 
 #[cfg(test)]
@@ -243,7 +192,6 @@ mod tests {
             sanitize_flag("-C target-cpu=native").as_deref(),
             Some("-C target-cpu=native")
         );
-        assert_eq!(sanitize_flag("-Zthreads=8").as_deref(), Some("-Zthreads=8"));
         // linker identity survives, its directory does not
         assert_eq!(
             sanitize_flag("-Clinker=/usr/bin/clang").as_deref(),
@@ -268,11 +216,8 @@ mod tests {
 
     #[test]
     fn rejoins_spaced_flags() {
-        let f = split_flags("-C target-cpu=native -Zthreads=8 -C lto=thin", false);
-        assert_eq!(
-            f,
-            vec!["-C target-cpu=native", "-Zthreads=8", "-C lto=thin"]
-        );
+        let f = split_flags("-C target-cpu=native -C lto=thin", false);
+        assert_eq!(f, vec!["-C target-cpu=native", "-C lto=thin"]);
         // and the rejoined form still classifies correctly
         assert_eq!(
             sanitize_flag("-C linker=/usr/bin/clang").as_deref(),

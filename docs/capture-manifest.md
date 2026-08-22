@@ -1,175 +1,94 @@
-# Capture Manifest — everything worth recording about a build
+# Capture manifest
 
-**Scope: everything obtainable from two instruments — a sampling profiler
-around the whole build, and `cargo build --timings`.** Both work on stable, on
-any rustc version, and neither sits in the compile path, so neither collides
-with a contributor's `sccache`. Fields that need a nightly `-Z` flag, a rustc
-wrapper, or an extra build are listed as unsupported measurements.
+The capture contract has two required measurement sources: stable Cargo
+`--timings` and samply around the same build.
 
-The archival round is only one-time if nothing forces a redo, so within that
-scope this list errs exhaustive. Archive classes: **MUST** (analysis depends on
-it), **RIDE** (near free alongside an instrumented build; capture
-speculatively), **TGT** (costs an extra pass; run targeted, on implicated
-classes only), **DRV** (re-derivable forever from archived source; cache, never
-archive-critical).
-
-Granularity: `class` = compilation-unit class (the individual), `proj` =
-project view, `era` = one archival round.
-
-## A. Identity & provenance (class) — all MUST
+## Identity and configuration
 
 | field | source |
 | --- | --- |
-| package name, version, source id (crates.io / git+rev / path) | rustc argv source path + `--timings` `name`/`version` |
-| resolved feature set | rustc argv `--cfg feature=`, and `--timings` `features` |
-| dependency edges as class ids (the cone) | `--timings` `unblocked_units` |
-| resolved profile: opt-level, debuginfo, codegen-units, panic, overflow-checks, lto, incremental | rustc argv `-C` flags, verbatim |
-| full rustc argv, verbatim, plus filtered env | the profile's processName (`samply --include-args`) |
-| target triple, edition | rustc argv `--target`, `--edition` |
-| toolchain (rustc -vV: commit hash, LLVM version) | `rustc -vV`, one call per build |
-| source hash: crates.io checksum, or workspace commit + dirty patch | lockfile / git |
-| unit key (disambiguates the many `build_script_build`) | rustc argv `-C metadata=` |
+| package name and version | Cargo timing unit |
+| target and compilation mode | Cargo timing unit |
+| resolved feature set | Cargo timing unit and rustc arguments |
+| dependency-unblocking edges | Cargo timing unit |
+| opt-level, debuginfo, codegen units, panic, LTO, incremental, target features | scrubbed rustc arguments in samply |
+| compiler version and host | Cargo timing report summary |
+| profile and jobs | Cargo timing report summary |
+| CI presence | client process |
 
-## B. Terminal responses (class)
+The client never sends source paths or full command lines. Path values are
+removed; program paths such as a linker or wrapper are reduced to a basename.
 
-| field | source | class |
+## Unit measurements
+
+| field | source | quantity |
 | --- | --- | --- |
-| CPU per rustc invocation, split by compiler phase | **sampler** — samples carry a pid and every unit is its own process, so per-class CPU is first-class rather than derived from wall sections | MUST |
-| per-unit wall, start/end timestamps (schedule reconstruction) | **sampler** (process start/exit) and **--timings** (`start`, `duration`) — two independent sources, so they cross-check | MUST |
-| rmeta-emit time (the pipelining point) | **--timings** `sections` | MUST |
-| units active / waiting / inactive over the build | **--timings** `CONCURRENCY_DATA` — the only source for "was this build dependency-bound or CPU-bound" | MUST |
-| whole-build CPU curve | **--timings** `CPU_USAGE` | MUST |
-| blocked time per unit (thread parked, burning no CPU) | **sampler** — leaf frame in a wait syscall; a bucket of its own, never folded into a phase | MUST |
-| `-j`, jobs in flight | **--timings** concurrency + rustc argv | MUST |
-| max RSS, faults, context switches, fs in/out | **not captured** — needs `wait4` around each rustc, which requires an incompatible rustc wrapper | — |
-| exit code, warning count, stderr on failure | **not captured** — see *What these two instruments cannot give* | — |
+| unit start and duration | Cargo timing unit | wall clock |
+| frontend section | Cargo timing section | wall clock |
+| codegen section | Cargo timing section | wall clock |
+| link section | Cargo timing section | wall clock |
+| rustc process duration | samply process metadata | wall clock |
+| macro expansion | samply symbol attribution | CPU-weighted samples |
+| resolution | samply symbol attribution | CPU-weighted samples |
+| coherence | samply symbol attribution | CPU-weighted samples |
+| type checking | samply symbol attribution | CPU-weighted samples |
+| borrow checking and MIR transforms | samply symbol attribution | CPU-weighted samples |
+| monomorphization | samply symbol attribution | CPU-weighted samples |
+| metadata encoding | samply symbol attribution | CPU-weighted samples |
+| code generation | samply symbol attribution | CPU-weighted samples |
+| blocked and unattributed work | samply stack attribution | CPU-weighted samples |
 
-## C. Phase decomposition (class)
+Serial and parallel-codegen samples are distinct. Do not compare or combine
+CPU-weighted phase counts with Cargo wall-clock section durations as though
+they were the same measure.
 
-| field | source | class |
-| --- | --- | --- |
-| frontend/codegen sections (WALL) | **--timings** `sections` | MUST (the conserved backbone) |
-| phase decomposition (CPU): macro_expand, resolve, type_check, coherence, borrowck, monomorphize, metadata_encode, codegen | **sampler** — symbol prefix recovers the phase, because rustc's crate structure is its phase structure | MUST |
-| serial vs per-CGU-thread split | **sampler** — thread name; rustc codegens on a thread per CGU and a blended number is comparable to neither wall nor CPU | MUST |
-| conservation verdict: Σ sampled phases vs unit wall, tolerance, pass/fail | computed at capture | MUST |
+## Build timeline
 
-The two rows above measure different things and must never be compared
-directly. `--timings` sections are **wall boundaries**; sampled phases are
-**CPU**. On a 16-CGU crate they disagree by up to ten points purely because
-codegen runs on many threads at once. That disagreement is itself a signal —
-the ratio is realized codegen parallelism — but only if the two are kept
-apart.
+| field | source |
+| --- | --- |
+| active units | Cargo concurrency timeline |
+| units waiting on dependencies | Cargo concurrency timeline |
+| inactive units | Cargo concurrency timeline |
+| whole-machine CPU percentage | Cargo CPU timeline |
+| load average mean and maximum | client load sampler |
+| CPU busy mean and maximum | client load sampler |
+| Linux CPU, I/O, and memory pressure deltas | client load sampler |
 
-## D. Intermediate responses (class) — the mechanistic layer
+Cargo concurrency and CPU series use different timestamps. Public timeline
+rows therefore contain either the concurrency triple or CPU percentage, never
+an artificial index-based join.
 
-| field | source | class |
-| --- | --- | --- |
-| CGU count, and time per codegen unit | **sampler** — one named thread per CGU (`opt cgu.NN`), so both fall out of thread attribution | MUST |
-| trait-solving cost | **sampler** — `rustc_trait_selection` is ~24% of compile CPU on real crates and has no span of its own, so no phase-based tool reports it at all | MUST |
-| artifact bytes: rmeta, rlib, .o total | reading files cargo already wrote, before target cleanup | MUST (needs no instrument) |
-| artifact detail: section sizes (.text/.data/.rodata), symbol count, debuginfo bytes | `size`/`nm` on the same artifacts | RIDE (cheap, no instrument) |
-| dep-info file lists (what source was actually read) | `.d` files cargo already wrote | RIDE (needs no instrument) |
-| mono items, HIR node counts, LLVM pass statistics, per-macro expansion time | **out of scope** — every one needs a nightly `-Z` flag; see below |
+## Machine context
 
-## E. Source variables (class) — all DRV
+- machine id, unless explicitly omitted;
+- CPU model and logical core count;
+- memory size;
+- operating system, version, kernel, and architecture;
+- virtualization hint;
+- Cargo version; and
+- CI presence.
 
-whyslow-metrics census + shape metrics, LOC/bytes/files, at a recorded
-extractor version. Recomputed at will from archived source; never load-bearing
-in the archive.
+Hostname, username, and network identity are not read.
 
-## F. Project view (proj)
+## Privacy and completeness
 
-| field | source | class |
-| --- | --- | --- |
-| the DAG over class ids | **--timings** `unblocked_units` / `unblocked_rmeta_units` | MUST |
-| resolved features per unit | **--timings** `features`, and rustc argv `--cfg feature=` | MUST |
-| package name, version, target kind | **--timings**, and rustc argv | MUST |
-| build-script executions: which ran, and for how long | **sampler** — a build script is a process in the tree; its *compilation* also appears as a unit | MUST |
-| link step: wall, linker identity, argv | **sampler** — the linker is a child process like any other | RIDE (untested) |
-| whole-build envelope: process-tree wall + reconciliation vs Σ classes | **sampler** — the profile spans the entire tree (140 processes on a bun build) | MUST |
-| schedule Gantt + realized parallelism + critical path | derived from B timestamps and the DAG | DRV |
-| licenses, workspace members | **not captured** — needs `cargo metadata` | — |
-| final binary bloat, ICF potential | **out of scope** — separate builds and tools | — |
+Cargo timing units and samply units pass the public-package classifier before
+upload. Withheld units contribute no identity, timing, samples, settings, or
+edges. `units_withheld` is the only retained fact about them.
 
-## G. Environment (once per measurement run)
+A payload is complete only after the sampled Cargo command, timing parser, and
+samply parser all succeed. The client does not create partial observations.
 
-Machine identity (CPU model, cores, memory, kernel, governor), load+PSI
-timeline for the whole run, toolchain hashes, filtered env snapshot, corpus
-list with pins, randomization seeds and shard plan, tool git revs.
+## Payload and publication
 
-Two attestations are load-bearing rather than hygiene, because both make a unit
-look fast for a reason that has nothing to do with the compiler:
+The schema-2 payload contains:
 
-- **cache state.** An `sccache` hit compiles nothing, so it spawns no rustc,
-  collects no samples, and still appears as a unit in the build graph. It must
-  be recorded as a cache event with no timing claim, never as a fast compile.
-  On a developer machine hits are the majority case, not an edge case.
-- **incremental on/off.** A cached incremental build shifts every phase
-  boundary. Sessions with it on are not comparable to sessions without.
+- `timings.unit_data`;
+- `timings.concurrency_data`;
+- `timings.cpu_usage`;
+- `phases.units`;
+- build, machine, and load context; and
+- counts describing retained and withheld units.
 
-## H. Replicates
-
-Classes deliberately built more than once (across shards or repeated by
-design) are kept as rows, never averaged at capture — they are the noise
-floor. The schedule position of each build (what else was running) rides
-along from B.
-
-## I. Publication
-
-Measurements are published as parquet on object storage, partitioned by date,
-with raw instrument outputs alongside. Zero-egress storage makes the query
-surface free to serve, so the public interface is `ATTACH` plus SQL rather than
-an API.
-
-- **Publish**: measurements, raw instrument outputs, metadata. Sampled phase
-  counts are tiny (aggregated per unit, not per sample), so the raw session
-  blobs dominate at O(10-20 KB) x O(classes) — three orders of magnitude below
-  what raw self-profiles would have cost.
-- **Do not publish**: compiled artifacts (huge, pointless, a supply-chain
-  liability). Sources are assumed available — crates.io and pinned repos are the
-  archive; we store pins and patches only.
-- **Keying**: `class_id` is the fingerprint hash WITHOUT the toolchain, so
-  identity is the specimen and the toolchain is an observed condition. Two
-  measurements of one class under different nightlies join on `class_id`, which
-  is what makes "same class, new compiler, what moved?" a query rather than a
-  project.
-
-Aggregation and release use the current parquet schema described in
-`docs/schema.md`; the raw session blobs remain the re-runnable source of truth.
-
-## The two instruments
-
-**A sampling profiler around the whole build.** Not around each rustc: the
-profiler costs a flat ~1s per invocation regardless of what it profiles, so
-per-unit sampling would pay that for every crate. Wrapping once is also what
-makes attribution work — samples carry a pid, every compilation unit is its own
-process, and `--include-args` puts the rustc command line in the profile, so a
-unit's identity is already in the data. Attribution is exact however many units
-compile in parallel; a time-window join would be hopeless on `-j12`.
-
-Validated against nightly `-Ztime-passes` at `-Ccodegen-units=1`: every phase
-within about one point.
-
-**`cargo build --timings`.** Stable since 1.60. The HTML embeds `UNIT_DATA`
-(durations, features, versions, the DAG, frontend/codegen sections),
-`CONCURRENCY_DATA` and `CPU_USAGE`. Most of it duplicates what the sampler and
-the session log already give, which is the point: two independent measurements
-of per-unit wall that can be cross-checked. What only it provides is
-`CONCURRENCY_DATA` — how many units were ready-but-blocked versus running.
-
-No cratebank component sets `RUSTC_WRAPPER`. Cargo's `RUSTC_WRAPPER` overrides
-`build.rustc-wrapper` rather than stacking with it, so using one would evict a
-contributor's configured `sccache`.
-
-## Unsupported measurements
-
-| wanted | needs | why not |
-| --- | --- | --- |
-| 57 named passes | `-Ztime-passes` | nightly; hard error on stable |
-| per-query profile, cache hits/misses | `-Zself-profile` | nightly, and **14 MB compressed for a 3-crate build** |
-| mono items, CGU assignment, HIR node counts | `-Zdump-mono-stats`, `-Zprint-mono-items`, `-Zhir-stats` | nightly |
-| per-macro expansion time | `-Zmacro-stats` / self-profile | nightly |
-| max RSS, faults, context switches | `wait4` around each rustc | requires the wrapper, which evicts sccache |
-| exit code, warning count, stderr | wrapping rustc, or parsing cargo's JSON | wrapper; cargo's `--message-format=json` could reach the warnings |
-| LLVM pass statistics, IR lines | `-Cllvm-args=-stats`, `cargo llvm-lines` | perturbs, or needs a separate build |
-| licenses, workspace members | `cargo metadata` | not provided by the two capture instruments |
+It is encoded as zstd JSON and stored verbatim. Daily compaction derives the
+five public parquet tables from these fields.

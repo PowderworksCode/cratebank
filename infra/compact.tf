@@ -6,7 +6,7 @@
 #
 #   SELECT * FROM 'https://data.cratebank.io/units.parquet';
 
-# Shared secret for the compactor's manual trigger. The nightly cron needs no
+# Shared secret for the compactor's manual trigger. The daily cron needs no
 # credential; this only guards POST /compact, so a rebuild cannot be forced by
 # anyone who finds the hostname.
 variable "compact_secret" {

@@ -1,76 +1,47 @@
-# Schema
+# Public schema
 
-## The individual: a compilation class
+Each successful `cargo cratebank build` produces one schema-2 payload that
+contains parsed stable Cargo timings and parsed samply output from the same
+build. Daily compaction publishes five Parquet tables at fixed URLs under
+`https://data.cratebank.io/`.
 
-```
-class_id = hash(package, version, source_id, resolved_features,
-                cone (recursively, by class_id), profile, rustflags, target)
-```
+The machine-readable schema is
+`https://data.cratebank.io/schema/v2/tables.json`.
 
-Deliberately **excludes the toolchain**. Identity is the specimen; *when* it was
-measured is separate. So a measurement keys on `(class_id, observed_at)`,
-observations join on `class_id`, and "same class, new nightly, what moved?" is
-one join across every class in the ecosystem.
+## `sessions.parquet`
 
-The cone (transitive dependency closure) is part of identity because a unit's
-compilation genuinely depends on it: every unit deserializes its cone's rmeta,
-and in dev profiles `share-generics` means what upstream already instantiated
-changes what this unit must emit.
+One row per sampled build. It contains the run id, payload and client versions,
+Cargo report summary, machine and load context, completeness, and retained and
+withheld unit counts.
 
-## Tables
+## `units.parquet`
 
-**classes** — one row per class_id. Identity, provenance, `dep_class_ids`
-(direct edges: the DAG), `cone_class_ids` (precomputed closure: summability),
-source pins.
+One row per public Cargo timing unit. It contains package name and version,
+mode, target, features, start and finish, duration, frontend/codegen/link wall
+spans, and the number of units unblocked.
 
-**measurements** — one row per `(class_id, observation)`. Terminal
-responses (CPU, wall, RSS, faults), phase decomposition, intermediate
-responses (mono items, artifact bytes), conservation verdict, capture context
-(machine, load, schedule position, harness versions). Replicates are rows,
-never averaged at capture.
+## `phases.parquet`
 
-**projects** — one row per project view: `unit_class_ids`, unit graph,
-link and build-script measurements, whole-build envelope.
+One row per public samply unit, thread class, and compiler phase. `samples` is
+a CPU-weighted sample count. `wall_s` is the rustc process duration. Serial and
+parallel codegen threads stay separate.
 
-**machines** — one row per contributing machine profile (see
-`contributed-builds.md`), including its calibration factor.
+## `timeline.parquet`
 
-**environments** — toolchain, policy attestations, client version: what a
-measurement was taken under.
+One row per Cargo concurrency or CPU sample. Cargo records those series on
+different clocks, so a row contains either `active`/`waiting`/`inactive` or
+`cpu_pct`.
 
-## Summability
+## `unit_flags.parquet`
 
-Aggregates are one `unnest` + join, never a recursive CTE:
+One row per public samply unit and scrubbed compilation setting. Paths and full
+command lines are absent; features are comma-separated and incremental is only
+a boolean.
 
-```sql
--- tokio and its whole cone
-SELECT sum(m.cpu_s)
-FROM classes c, unnest(c.cone_class_ids) AS t(id)
-JOIN measurements m ON m.class_id = t.id
-WHERE c.name = 'tokio';
-```
+All tables join through `run_id`. Cargo section values in `units.parquet` are
+wall-clock durations. Samply phase values in `phases.parquet` are CPU-weighted
+counts and must not be treated as the same quantity.
 
-Total cost decomposes exactly:
-
-```
-Total(project) = Σ intrinsic(class) + link + build-scripts
-```
-
-Costs a dependency *causes* land inside its consumers' class rows (generic
-instantiations, proc-macro execution, trait obligations) and are attributable
-because mono items and obligations carry their defining crate in the def-path.
-Linking — and LTO where enabled — is the explicitly non-additive remainder.
-
-## Format
-
-Parquet is canonical: frozen spec, every engine reads it, HTTP range reads
-work, and new data is an append. Anything that wants a single-file database
-can build one from the raw blobs; canonical data never lives only there. Contributed builds land as zstd-compressed JSON, one object per session (see `ingest.md`).
-
-```
-cratebank/
-  sessions/year=/month=/day=/*.json.zst   # what arrived, verbatim
-```
-
-Not published: compiled artifacts, and sources — crates.io and pinned repos
-are the source archive; cratebank stores pins and patches only.
+Raw schema-2 payloads remain stored as zstd JSON under date-partitioned
+`sessions/` keys. Source code, private unit identity, and filesystem paths are
+not uploaded.

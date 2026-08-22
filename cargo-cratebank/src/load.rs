@@ -5,10 +5,8 @@
 //! statistics carry a per-observation contention term, and this is what feeds
 //! it.
 //!
-//! Sampling only works while a build is running, so it happens in the two
-//! commands that are present for one — `build` and `watch`. Sessions shipped
-//! after the fact (`send`) report `null` rather than a load figure measured at
-//! the wrong time.
+//! Sampling runs for the same interval as the Cargo and samply capture so the
+//! load context belongs to the measured build.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 

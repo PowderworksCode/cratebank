@@ -9,10 +9,10 @@ LLVM, linking. Very little of it is measured, and almost none of it is measured
 across the enormous range of machines and crate graphs that real builds happen
 on.
 
-cratebank collects the timings your builds already produce, plus a sampled
-breakdown of what the compiler was doing, and publishes the result so anyone
-can query it. The same dependencies get compiled on thousands of machines;
-that overlap is what makes the comparison work.
+cratebank runs one Cargo build under samply, combines Cargo's timing report
+with a sampled breakdown of what the compiler was doing, and publishes the
+result so anyone can query it. The same dependencies get compiled on thousands
+of machines; that overlap is what makes the comparison work.
 
 ## Getting started
 
@@ -23,8 +23,8 @@ cargo install samply          # the profiler that measures compiler phases
 cargo cratebank build         # builds, measures, and sends
 ```
 
-> Needs a nightly toolchain for cargo's build-analysis logs. Without samply it
-> still works — you get the build and the timings, just no phase breakdown.
+Uses stable Cargo. Samply is required: the command sends nothing unless the
+sampled build, Cargo timing report, and samply profile all parse successfully.
 
 ## What gets sent
 
@@ -37,8 +37,8 @@ cargo cratebank build         # builds, measures, and sends
 - **Your own crates are private by default.** Publishing them takes an explicit
   opt-in: `[package.metadata.cratebank] public = true`.
 
-> Nothing sits in your compile path, so there is no conflict with `sccache` or
-> any other `RUSTC_WRAPPER`, and no build is ever run on your behalf.
+> Nothing wraps rustc, so there is no conflict with `sccache` or any other
+> `RUSTC_WRAPPER`. The build runs only when you invoke `cargo cratebank build`.
 
 ## Using the data
 
@@ -64,7 +64,7 @@ Five tables, described by a machine-readable schema:
 - `timeline.parquet` — build concurrency and CPU over time
 - `unit_flags.parquet` — the settings each unit was built with
 
-[schema/v1/tables.json](https://data.cratebank.io/schema/v1/tables.json)
+[schema/v2/tables.json](https://data.cratebank.io/schema/v2/tables.json)
 describes every column, and carries the warnings that matter — chiefly that
 sampled phases are *CPU* while the section boundaries in `units` are *wall
 clock*, and the two are not interchangeable.

@@ -2,14 +2,12 @@
 //
 // The raw uploads are zstd-compressed JSON, one object per build, and they stay
 // the ground truth -- nothing here is authoritative. This job produces the
-// *convenient* form: two flat parquet tables at a stable public URL, so anyone
+// *convenient* form: five flat parquet tables at stable public URLs, so anyone
 // can query the census with one line and no credentials:
 //
 //   SELECT * FROM 'https://data.cratebank.io/units.parquet';
 //
-// That indirection is the point. A reading done here can be corrected and
-// re-run over everything already collected, which is exactly what could not be
-// done if the client had flattened the payload before sending it.
+// Compaction can be corrected and rerun over everything already collected.
 //
 // Both dependencies are pure JavaScript on purpose: Workers' DecompressionStream
 // supports only gzip/deflate/deflate-raw, so zstd needs a library, and a WASM
@@ -20,26 +18,10 @@ import { parquetWriteBuffer } from 'hyparquet-writer'
 
 const SESSIONS = 'sessions/'
 
-// cargo package ids look like `registry+https://…/index#serde@1.0.0` or
-// `workspace#bun_alloc@0.0.0`. The bare crate name is the useful thing --
-// without it, every build script is called `build-script-build` and the obvious
-// `ORDER BY duration` query says nothing about which package is slow.
-function packageName(id) {
-  if (!id) return null
-  const hash = id.lastIndexOf('#')
-  if (hash === -1) return null
-  const frag = id.slice(hash + 1)
-  const at = frag.indexOf('@') // versions may contain '@'-free '+' build metadata
-  return at === -1 ? frag || null : frag.slice(0, at) || null
-}
-
 // Deliberately unbatched: hold every row in memory, write one file. At the
 // current scale that is free, and the failure mode is loud rather than subtle
 // -- the Worker's 128 MB ceiling produces an error, not a silently truncated
-// dataset. The escape hatch when it arrives is per-day compaction into
-// daily/YYYY-MM-DD.parquet, merging only the days not already merged, which the
-// hive-partitioned key layout already supports. `stats` below is what tells you
-// it is coming; watch objects and bytes in the cron logs.
+// dataset. Watch objects and bytes in the cron logs.
 
 /** Every object under sessions/, following the 1000-per-page cursor. */
 async function listAll(bucket) {
@@ -53,85 +35,38 @@ async function listAll(bucket) {
   return keys
 }
 
-/** One session blob -> rows for both tables. */
+/** One session blob -> public table rows. */
 function flatten(session, key) {
   const s = session
-  // `elapsed` on a cargo event is a TIMESTAMP -- seconds since the build
-  // started -- not a duration. Every event for a unit carries a larger value
-  // than the last. Publishing it as a duration silently answers "which crates
-  // finished last" when the reader asked "which crates were slowest", and the
-  // two rankings are completely different: on a real build the top finishers
-  // took 50-90ms each, while the genuinely slow units were build scripts at
-  // over a second.
-  //
-  // So durations are differences, computed here, and the raw timestamps are
-  // published too since finish order is what critical-path analysis needs.
-  const units = new Map()
-  const sectionStart = new Map() // `${index}:${section}` -> timestamp
-  for (const e of s.events ?? []) {
-    if (e.reason === 'unit-registered') {
-      units.set(e.index, {
-        crate: e.target?.name ?? null,
-        mode: e.mode ?? null,
-        package_id: e.package_id ?? null,
-        package: packageName(e.package_id),
-        started: null,
-        finished: null,
-        duration: null,
-        frontend: null,
-        codegen: null,
-        link: null,
-        sectioned: false,
-        unblocked: null,
-      })
-    } else if (e.reason === 'unit-started') {
-      const u = units.get(e.index)
-      if (u) u.started = e.elapsed ?? null
-    } else if (e.reason === 'unit-finished') {
-      const u = units.get(e.index)
-      if (u) {
-        u.finished = e.elapsed ?? null
-        if (u.started != null && u.finished != null) u.duration = u.finished - u.started
-        u.unblocked = Array.isArray(e.unblocked) ? e.unblocked.length : null
-      }
-    } else if (e.reason === 'unit-section-started') {
-      if (e.section && e.elapsed != null) sectionStart.set(`${e.index}:${e.section}`, e.elapsed)
-    } else if (e.reason === 'unit-section-finished') {
-      const u = units.get(e.index)
-      const t0 = sectionStart.get(`${e.index}:${e.section}`)
-      // Sections can repeat for a unit, so accumulate durations rather than
-      // overwrite. Only known section names get a column; cargo currently
-      // emits codegen and link, and `frontend` stays null until it emits one.
-      if (u && e.section && e.elapsed != null && t0 != null && e.section in u) {
-        u[e.section] = (u[e.section] ?? 0) + (e.elapsed - t0)
-        u.sectioned = true
+  if (s.cratebank_schema !== 2) {
+    throw new Error(`unsupported payload schema: ${s.cratebank_schema ?? 'missing'}`)
+  }
+  const unitRows = (s.timings?.unit_data ?? []).map(unit => {
+    const sections = { frontend: null, codegen: null, link: null }
+    for (const [name, span] of unit.sections ?? []) {
+      if (name in sections && span?.start != null && span?.end != null) {
+        sections[name] = (sections[name] ?? 0) + (span.end - span.start)
       }
     }
-  }
-
-  // `frontend` is DERIVED, not measured. cargo emits sections for `codegen`
-  // and `link` only, so the parsing/type-checking/borrow-checking time is
-  // whatever is left of the unit's duration. Without it the section columns
-  // answer "where did the time go" with a hole exactly where the answer
-  // usually is -- plenty of units show codegen 0.0 / link 0.0 and a
-  // sub-second duration, all of which is frontend.
-  //
-  // Only computed for units that actually reported sections; null elsewhere
-  // (build scripts, for instance, report none). It can come out slightly
-  // negative when section and unit timings overlap at the edges -- that is
-  // left as measured rather than clamped, because a clamp would hide it.
-  for (const u of units.values()) {
-    if (u.sectioned && u.duration != null) {
-      u.frontend = u.duration - (u.codegen ?? 0) - (u.link ?? 0)
+    return {
+      run_id: s.run_id ?? null,
+      index: unit.i ?? null,
+      crate: unit.name ?? null,
+      package: unit.name ?? null,
+      version: unit.version ?? null,
+      mode: unit.mode ?? null,
+      target: unit.target?.trim() || null,
+      features: Array.isArray(unit.features) ? unit.features.join(',') : null,
+      started: unit.start ?? null,
+      finished: unit.start != null && unit.duration != null
+        ? unit.start + unit.duration : null,
+      duration: unit.duration ?? null,
+      frontend: sections.frontend,
+      codegen: sections.codegen,
+      link: sections.link,
+      unblocked: Array.isArray(unit.unblocked_units) ? unit.unblocked_units.length : null,
     }
-    delete u.sectioned
-  }
-
-  const unitRows = [...units.entries()].map(([index, u]) => ({
-    run_id: s.run_id ?? null,
-    index,
-    ...u,
-  }))
+  })
 
   const sessionRow = {
     run_id: s.run_id ?? null,
@@ -144,7 +79,6 @@ function flatten(session, key) {
     jobs: s.env?.jobs ?? null,
     ci: s.env?.ci ?? null,
     complete: s.complete ?? null,
-    events: s.counts?.events ?? null,
     units: s.counts?.units ?? null,
     units_withheld: s.counts?.units_withheld ?? null,
     sections: s.counts?.sections ?? null,
@@ -165,9 +99,9 @@ function flatten(session, key) {
   // threads -- blending them gives a number comparable to neither wall clock
   // nor CPU.
   //
-  // Deliberately NOT reusing the `frontend`/`codegen` column names from the
-  // unit table: those come from artifact/rmeta boundaries (wall), these come
-  // from sampling (CPU). Same words, different measurements.
+  // The unit table's `frontend` and `codegen` values are Cargo wall-clock
+  // sections; these rows are samply CPU-weighted counts. Same words, different
+  // measurements.
   const phaseRows = []
   for (const pu of s.phases?.units ?? []) {
     for (const [thread, counts] of [['serial', pu.serial], ['parallel', pu.parallel]]) {
@@ -234,15 +168,9 @@ function flatten(session, key) {
   return { unitRows, sessionRow, phaseRows, timelineRows, flagRows }
 }
 
-// Column builders. Two hard-won details:
-//
-// 1. INT64 needs real BigInt -- hyparquet-writer throws on plain numbers, and
-//    it throws at write time, after every blob has already been decompressed.
-// 2. They coerce rather than trust. cargo's log format is explicitly still
-//    moving, which is the premise this whole project is built on, so a field
-//    that changes type must not kill the nightly job for everyone. The raw
-//    blobs remain the ground truth if a coercion here is ever wrong.
-//    (`cratebank_schema` is a number, not a string -- found exactly this way.)
+// INT64 columns use BigInt as required by hyparquet-writer. Every builder
+// coerces input at the table boundary so one malformed payload cannot stop the
+// daily compaction; raw blobs remain the ground truth.
 const num = v => {
   const n = Number(v)
   return Number.isFinite(n) ? n : null
@@ -314,7 +242,7 @@ async function compact(env) {
     columnData: [
       str(unitRows, 'run_id'), i64(unitRows, 'index'),
       str(unitRows, 'crate'), str(unitRows, 'package'), str(unitRows, 'mode'),
-      str(unitRows, 'package_id'),
+      str(unitRows, 'version'), str(unitRows, 'target'), str(unitRows, 'features'),
       dbl(unitRows, 'duration'), dbl(unitRows, 'started'), dbl(unitRows, 'finished'),
       dbl(unitRows, 'frontend'), dbl(unitRows, 'codegen'), dbl(unitRows, 'link'),
       i64(unitRows, 'unblocked'),
@@ -329,7 +257,7 @@ async function compact(env) {
       str(sessionRows, 'timestamp'), str(sessionRows, 'rustc_version'),
       str(sessionRows, 'profile'), i64(sessionRows, 'jobs'), bool(sessionRows, 'ci'),
       bool(sessionRows, 'complete'),
-      i64(sessionRows, 'events'), i64(sessionRows, 'units'),
+      i64(sessionRows, 'units'),
       i64(sessionRows, 'units_withheld'), i64(sessionRows, 'sections'),
       str(sessionRows, 'machine_id'), str(sessionRows, 'os'), str(sessionRows, 'arch'),
       str(sessionRows, 'cpu_model'), i64(sessionRows, 'cpu_cores'), i64(sessionRows, 'mem_gb'),
@@ -382,26 +310,28 @@ async function compact(env) {
   // every snapshot tied to its schema. The schema is generated from the same
   // column lists that build the files, so it cannot drift from them.
   const schema = {
-    version: 1,
+    version: 2,
     generated: new Date().toISOString(),
-    note: 'Raw sessions under sessions/ are the ground truth; these tables are derived and rebuilt nightly.',
+    note: 'Raw sessions under sessions/ are the ground truth; these tables are derived and rebuilt daily.',
     tables: {
       'units.parquet': {
         grain: 'one row per compilation unit',
-        source: 'cargo build-analysis session log',
+        source: 'cargo build --timings',
         columns: {
           run_id: 'session id; joins to sessions.parquet',
           index: 'cargo unit index within the session',
-          crate: "crate name; every build script is called 'build-script-build'",
-          package: 'package name parsed from package_id -- the useful one',
-          mode: 'build | run-custom-build',
-          package_id: 'cargo package id, verbatim',
-          duration: 'seconds; finished - started',
+          crate: 'package name reported by Cargo',
+          package: 'package name reported by Cargo',
+          version: 'package version',
+          mode: 'Cargo compilation mode',
+          target: 'target label, including build-script when applicable',
+          features: 'resolved feature names, comma-separated',
+          duration: 'wall seconds',
           started: 'seconds since build start (timestamp, not a duration)',
           finished: 'seconds since build start',
-          frontend: 'seconds to rmeta; WALL, from artifact boundaries',
-          codegen: 'seconds after rmeta; WALL',
-          link: 'seconds; WALL',
+          frontend: 'frontend wall seconds from Cargo timings',
+          codegen: 'codegen wall seconds from Cargo timings',
+          link: 'link wall seconds from Cargo timings',
           unblocked: 'count of units this one released',
         },
       },
@@ -411,8 +341,8 @@ async function compact(env) {
           run_id: 'session id', object_key: 'the raw blob this was derived from',
           client: 'cargo-cratebank version', schema: 'payload schema version',
           timestamp: 'build start, RFC3339', rustc_version: '', profile: 'dev | release',
-          jobs: '-j value', ci: 'CI env var was set', complete: 'every registered unit finished',
-          events: '', units: '', units_withheld: 'private units omitted; the graph is partial',
+          jobs: '-j value', ci: 'CI env var was set', complete: 'the sampled build succeeded',
+          units: '', units_withheld: 'private units omitted; the graph is partial',
           sections: '', machine_id: 'self-declared, unverified', os: '', arch: '',
           cpu_model: '', cpu_cores: '', mem_gb: '',
           loadavg_mean: 'machine load during the build', cpu_busy_mean: 'percent',
@@ -473,7 +403,7 @@ async function compact(env) {
 
   await Promise.all([
     put('units.parquet', unitsBuf),
-    env.BUCKET.put('schema/v1/tables.json', schemaBuf, {
+    env.BUCKET.put('schema/v2/tables.json', schemaBuf, {
       httpMetadata: { contentType: 'application/json' },
     }),
     ...(phasesBuf
@@ -508,6 +438,8 @@ async function compact(env) {
   console.log(`compact: ${JSON.stringify(stats)}`)
   return stats
 }
+
+export { flatten }
 
 export default {
   async scheduled(_event, env, ctx) {

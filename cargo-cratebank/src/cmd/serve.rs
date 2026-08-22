@@ -74,11 +74,11 @@ pub fn run(_o: &Common, port: u16) -> i32 {
                 .to_string()
         };
         match serde_json::from_str::<Value>(&body) {
-            Ok(v) => eprintln!("[ingest]{} run {} · {} events · {} units ({} withheld) · {} sections · {} · rustc {}",
+            Ok(v) => eprintln!("[ingest]{} run {} · {} timing units ({} withheld) · {} sampled units · {} · rustc {}",
                 if compressed { " zstd" } else { "" },
                 v["run_id"].as_str().unwrap_or("?"),
-                v["counts"]["events"], v["counts"]["units"], v["counts"]["units_withheld"],
-                v["counts"]["sections"], v["env"]["host"].as_str().unwrap_or("?"),
+                v["counts"]["units"], v["counts"]["units_withheld"],
+                v["counts"]["phase_units"], v["env"]["host"].as_str().unwrap_or("?"),
                 v["env"]["rustc_version"].as_str().unwrap_or("?")),
             Err(e) => eprintln!("[ingest] {} bytes, not json ({e})", body.len()),
         }
