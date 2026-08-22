@@ -25,6 +25,12 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // A browser landing here is a person, not a client. They typed or clicked
+    // the hostname printed in `cargo cratebank status`, and a JSON 405 tells
+    // them nothing about what this is. Send them to the page that does.
+    if (request.method === "GET" || request.method === "HEAD") {
+      return Response.redirect("https://cratebank.io/", 302);
+    }
     if (request.method !== "POST") {
       return json({ success: false, error: "POST only" }, 405);
     }
