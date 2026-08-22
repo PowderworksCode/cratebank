@@ -62,6 +62,9 @@ const MARKERS: &[(&str, &[&str])] = &[
 pub struct UnitPhases {
     pub crate_name: String,
     pub crate_type: String,
+    /// Package this unit belongs to. Distinguishes the many build scripts,
+    /// all of which are named `build_script_build`.
+    pub package: String,
     /// Samples on the main thread: the serial part of compilation.
     pub serial: BTreeMap<String, u64>,
     /// Samples on per-codegen-unit threads. rustc codegens on a thread per
@@ -69,6 +72,11 @@ pub struct UnitPhases {
     /// large build. Kept separate because mixing it with `serial` produces a
     /// number comparable to neither wall clock nor CPU.
     pub parallel: BTreeMap<String, u64>,
+    /// Wall seconds for this unit, from the profiler's own record of when the
+    /// rustc process started and exited. Free -- the profile already carries
+    /// it -- and it is the denominator that makes sample counts meaningful:
+    /// without it, "1200 samples" says nothing about how long anything took.
+    pub wall_s: Option<f64>,
 }
 
 impl UnitPhases {
@@ -122,20 +130,46 @@ pub fn record(args: &[String], out: &Path, rate: u32) -> Result<(PathBuf, PathBu
     Ok((prof, syms))
 }
 
-/// `(crate_name, crate_type)` from a rustc command line, or None if this
-/// process is not a compilation.
+/// Identity of one compilation unit, from its rustc command line.
+///
+/// `crate_name` alone is not unique: every package's build script is called
+/// `build_script_build`, so keying on the name merges unrelated packages into
+/// one unit -- their samples add up while the wall time is whichever process
+/// was seen first. cargo's `-C metadata=<hash>` is unique per unit, so it is
+/// the key; `package` is carried alongside for readability.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnitId {
+    pub crate_name: String,
+    pub crate_type: String,
+    /// cargo's per-unit hash. Unique; not human-readable.
+    pub metadata: String,
+    /// Package directory for registry crates (`proc-macro2-1.0.107`), else the
+    /// crate name. What a human wants when the crate name is a build script.
+    pub package: String,
+}
+
+/// Unit identity from a rustc command line, or None if this process is not a
+/// compilation.
 ///
 /// cargo probes the compiler with `--print` invocations before building
 /// anything; those are not units and must not be counted.
-fn unit_of(process_name: &str) -> Option<(String, String)> {
+fn unit_of(process_name: &str) -> Option<UnitId> {
     if !process_name.starts_with("rustc") {
         return None;
     }
     let argv = split_args(process_name);
     let mut name = None;
     let mut kind = None;
+    let mut metadata = String::new();
+    let mut src = None;
     let mut it = argv.iter().peekable();
     while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("metadata=") {
+            metadata = v.to_string();
+        }
+        if a.ends_with(".rs") && src.is_none() {
+            src = Some(a.clone());
+        }
         if let Some(v) = a.strip_prefix("--crate-name=") {
             name = Some(v.to_string());
         } else if a == "--crate-name" {
@@ -152,7 +186,27 @@ fn unit_of(process_name: &str) -> Option<(String, String)> {
     if name == "___" || argv.iter().any(|a| a.starts_with("--print")) {
         return None;
     }
-    Some((name, kind.unwrap_or_else(|| "lib".into())))
+    // `/…/registry/src/index.crates.io-…/proc-macro2-1.0.107/{build.rs,src/lib.rs}`
+    // -> `proc-macro2-1.0.107`: the component just after the registry index
+    // directory. Taking the file's parent instead yields `src` for every
+    // library, which then merges every crate in the graph into one bogus unit.
+    // Workspace paths have no registry component, so fall back to the crate
+    // name rather than inventing one.
+    let package = src
+        .as_deref()
+        .and_then(|p| {
+            let rest = p.split("/registry/src/").nth(1)?;
+            let mut parts = rest.split('/');
+            parts.next()?; // the index directory
+            parts.next().map(str::to_string)
+        })
+        .unwrap_or_else(|| name.clone());
+    Some(UnitId {
+        crate_name: name,
+        crate_type: kind.unwrap_or_else(|| "lib".into()),
+        metadata,
+        package,
+    })
 }
 
 /// Shell-ish split honouring the single quotes samply writes around arguments.
@@ -241,7 +295,7 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
     .map_err(|e| e.to_string())?;
     let libs = p["libs"].as_array().cloned().unwrap_or_default();
 
-    let mut units: BTreeMap<(String, String), UnitPhases> = BTreeMap::new();
+    let mut units: BTreeMap<UnitId, UnitPhases> = BTreeMap::new();
     for t in p["threads"].as_array().into_iter().flatten() {
         let Some(unit) = t["processName"].as_str().and_then(unit_of) else {
             continue;
@@ -260,10 +314,24 @@ pub fn attribute(prof: &Path, syms: &Path) -> Result<Vec<UnitPhases>, String> {
         let (frames, prefixes) = (&st["frame"], &st["prefix"]);
 
         let e = units.entry(unit.clone()).or_insert_with(|| UnitPhases {
-            crate_name: unit.0.clone(),
-            crate_type: unit.1.clone(),
+            crate_name: unit.crate_name.clone(),
+            crate_type: unit.crate_type.clone(),
+            package: unit.package.clone(),
             ..Default::default()
         });
+
+        // Process start/exit are per-process, repeated on each of its threads;
+        // take them once. Milliseconds in the profile.
+        if e.wall_s.is_none() {
+            if let (Some(a), Some(b)) = (
+                t["processStartupTime"].as_f64(),
+                t["processShutdownTime"].as_f64(),
+            ) {
+                if b > a {
+                    e.wall_s = Some(((b - a) / 1000.0 * 1e6).round() / 1e6);
+                }
+            }
+        }
 
         for s in t["samples"]["stack"].as_array().into_iter().flatten() {
             let Some(mut node) = s.as_u64() else { continue };
@@ -319,7 +387,9 @@ pub fn to_json(units: &[UnitPhases], rate: u32) -> Value {
         "rate_hz": rate,
         "units": units.iter().map(|u| json!({
             "crate": u.crate_name,
+            "package": u.package,
             "crate_type": u.crate_type,
+            "wall_s": u.wall_s,
             "serial": u.serial,
             "parallel": u.parallel,
         })).collect::<Vec<_>>(),
@@ -333,11 +403,9 @@ mod tests {
     #[test]
     fn parses_a_rustc_command_line() {
         let pn = "rustc --crate-name bun_css '--edition=2024' src/css/lib.rs --crate-type lib '--emit=dep-info,metadata,link'";
-        assert_eq!(
-            unit_of(pn),
-            Some(("bun_css".into(), "lib".into())),
-            "quoted args must not break the split"
-        );
+        let u = unit_of(pn).expect("quoted args must not break the split");
+        assert_eq!(u.crate_name, "bun_css");
+        assert_eq!(u.crate_type, "lib");
     }
 
     #[test]
@@ -345,7 +413,24 @@ mod tests {
         // cargo runs this before building anything; counting it as a unit
         // would invent a crate called `___`.
         let pn = "rustc - --crate-name ___ '--print=file-names' --crate-type bin";
-        assert_eq!(unit_of(pn), None);
+        assert!(unit_of(pn).is_none());
+    }
+
+    #[test]
+    fn build_scripts_of_different_packages_are_different_units() {
+        // Every package's build script is called `build_script_build`. Keying
+        // on the name merged them: samples added up while wall time came from
+        // whichever ran first, which showed as one unit accounting for 223% of
+        // its own wall clock.
+        let a = unit_of("rustc --crate-name build_script_build /home/u/.cargo/registry/src/index.crates.io-1/proc-macro2-1.0.107/build.rs --crate-type bin -C 'metadata=aaa'").unwrap();
+        let b = unit_of("rustc --crate-name build_script_build /home/u/.cargo/registry/src/index.crates.io-1/libc-0.2.1/build.rs --crate-type bin -C 'metadata=bbb'").unwrap();
+        assert_ne!(a, b, "build scripts of different packages must not merge");
+        assert_eq!(a.package, "proc-macro2-1.0.107");
+        assert_eq!(b.package, "libc-0.2.1");
+        // a library's source lives under `<package>/src/lib.rs`; taking the
+        // file's parent directory would call every one of them `src`
+        let lib = unit_of("rustc --crate-name serde /home/u/.cargo/registry/src/index.crates.io-1/serde-1.0.229/src/lib.rs --crate-type lib -C 'metadata=ccc'").unwrap();
+        assert_eq!(lib.package, "serde-1.0.229");
     }
 
     #[test]

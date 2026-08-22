@@ -158,7 +158,37 @@ function flatten(session, key) {
     cpu_busy_mean: s.load?.cpu_busy_mean ?? null,
   }
 
-  return { unitRows, sessionRow }
+  // Sampled compiler phases, if the build was sampled. A long table rather
+  // than columns: the marker set will keep changing as the phase mapping
+  // improves, and a long table absorbs that where a wide one forces a
+  // migration. `thread` separates the serial frontend from the per-CGU codegen
+  // threads -- blending them gives a number comparable to neither wall clock
+  // nor CPU.
+  //
+  // Deliberately NOT reusing the `frontend`/`codegen` column names from the
+  // unit table: those come from artifact/rmeta boundaries (wall), these come
+  // from sampling (CPU). Same words, different measurements.
+  const phaseRows = []
+  for (const pu of s.phases?.units ?? []) {
+    for (const [thread, counts] of [['serial', pu.serial], ['parallel', pu.parallel]]) {
+      for (const [phase, samples] of Object.entries(counts ?? {})) {
+        phaseRows.push({
+          run_id: s.run_id ?? null,
+          crate: pu.crate ?? null,
+          package: pu.package ?? null,
+          crate_type: pu.crate_type ?? null,
+          thread,
+          phase,
+          samples,
+          wall_s: pu.wall_s ?? null,
+          rate_hz: s.phases?.rate_hz ?? null,
+          sampler: s.phases?.sampler ?? null,
+        })
+      }
+    }
+  }
+
+  return { unitRows, sessionRow, phaseRows }
 }
 
 // Column builders. Two hard-won details:
@@ -204,6 +234,7 @@ async function compact(env) {
 
   const unitRows = []
   const sessionRows = []
+  const phaseRows = []
   let bytesIn = 0
   let failed = 0
 
@@ -215,9 +246,10 @@ async function compact(env) {
       bytesIn += raw.byteLength
       const json = new TextDecoder().decode(decompress(raw))
       const parsed = JSON.parse(json)
-      const { unitRows: u, sessionRow } = flatten(parsed, key)
+      const { unitRows: u, sessionRow, phaseRows: ph } = flatten(parsed, key)
       unitRows.push(...u)
       sessionRows.push(sessionRow)
+      phaseRows.push(...ph)
     } catch (e) {
       // One malformed blob must not cost the whole run. Count it and move on;
       // the raw object is still there to inspect.
@@ -258,14 +290,97 @@ async function compact(env) {
     compressed: true,
   })
 
+  const phasesBuf = phaseRows.length
+    ? parquetWriteBuffer({
+        columnData: [
+          str(phaseRows, 'run_id'), str(phaseRows, 'crate'), str(phaseRows, 'package'),
+          str(phaseRows, 'crate_type'),
+          str(phaseRows, 'thread'), str(phaseRows, 'phase'), i64(phaseRows, 'samples'),
+          dbl(phaseRows, 'wall_s'), i64(phaseRows, 'rate_hz'), str(phaseRows, 'sampler'),
+        ],
+        compressed: true,
+      })
+    : null
+
   const day = new Date().toISOString().slice(0, 10)
   const put = (k, b) =>
     env.BUCKET.put(k, b, { httpMetadata: { contentType: 'application/vnd.apache.parquet' } })
 
   // Stable names are the public interface; the dated copies are an audit trail,
   // so a bad run can be diagnosed against the file it actually produced.
+  // The schema travels with the data. Published beside the parquet so anyone
+  // holding a copy can interpret it without this repository, and versioned so
+  // an old snapshot stays readable after the tables change. Generated from the
+  // same column lists that build the files, so it cannot drift from them.
+  const schema = {
+    version: 1,
+    generated: new Date().toISOString(),
+    note: 'Raw sessions under sessions/ are the ground truth; these tables are derived and rebuilt nightly.',
+    tables: {
+      'units.parquet': {
+        grain: 'one row per compilation unit',
+        source: 'cargo build-analysis session log',
+        columns: {
+          run_id: 'session id; joins to sessions.parquet',
+          index: 'cargo unit index within the session',
+          crate: "crate name; every build script is called 'build-script-build'",
+          package: 'package name parsed from package_id -- the useful one',
+          mode: 'build | run-custom-build',
+          package_id: 'cargo package id, verbatim',
+          duration: 'seconds; finished - started',
+          started: 'seconds since build start (timestamp, not a duration)',
+          finished: 'seconds since build start',
+          frontend: 'seconds to rmeta; WALL, from artifact boundaries',
+          codegen: 'seconds after rmeta; WALL',
+          link: 'seconds; WALL',
+          unblocked: 'count of units this one released',
+        },
+      },
+      'sessions.parquet': {
+        grain: 'one row per build',
+        columns: {
+          run_id: 'session id', object_key: 'the raw blob this was derived from',
+          client: 'cargo-cratebank version', schema: 'payload schema version',
+          timestamp: 'build start, RFC3339', rustc_version: '', profile: 'dev | release',
+          jobs: '-j value', ci: 'CI env var was set', complete: 'every registered unit finished',
+          events: '', units: '', units_withheld: 'private units omitted; the graph is partial',
+          sections: '', machine_id: 'self-declared, unverified', os: '', arch: '',
+          cpu_model: '', cpu_cores: '', mem_gb: '',
+          loadavg_mean: 'machine load during the build', cpu_busy_mean: 'percent',
+        },
+      },
+      'phases.parquet': {
+        grain: 'one row per unit per thread-class per phase',
+        source: 'sampling profiler around the whole build',
+        caution: 'CPU-weighted sample counts, not wall time. Not comparable to '
+          + "units.parquet's frontend/codegen, which are wall boundaries.",
+        columns: {
+          run_id: 'joins to sessions.parquet', crate: '',
+          package: "package this unit belongs to; distinguishes the many "
+            + "build scripts, which are all named build_script_build",
+          crate_type: '',
+          thread: "serial (main rustc) | parallel (per-codegen-unit threads); "
+            + 'do not sum them into one number',
+          phase: 'macro_expand | resolve | type_check | borrowck | coherence | '
+            + 'monomorphize | metadata_encode | codegen | unattributed',
+          samples: 'sample count, not seconds',
+          wall_s: 'wall seconds for the whole unit, from the profiler',
+          rate_hz: 'sampling rate, needed to turn samples into seconds',
+          sampler: 'which profiler produced this',
+        },
+      },
+    },
+  }
+  const schemaBuf = new TextEncoder().encode(JSON.stringify(schema, null, 2))
+
   await Promise.all([
     put('units.parquet', unitsBuf),
+    env.BUCKET.put('schema/v1/tables.json', schemaBuf, {
+      httpMetadata: { contentType: 'application/json' },
+    }),
+    ...(phasesBuf
+      ? [put('phases.parquet', phasesBuf), put(`snapshots/phases-${day}.parquet`, phasesBuf)]
+      : []),
     put('sessions.parquet', sessionsBuf),
     put(`snapshots/units-${day}.parquet`, unitsBuf),
     put(`snapshots/sessions-${day}.parquet`, sessionsBuf),
@@ -279,6 +394,8 @@ async function compact(env) {
     failed,
     bytes_in: bytesIn,
     units_parquet: unitsBuf.byteLength,
+    phase_rows: phaseRows.length,
+    phases_parquet: phasesBuf ? phasesBuf.byteLength : 0,
     sessions_parquet: sessionsBuf.byteLength,
     ms: Date.now() - started,
   }
